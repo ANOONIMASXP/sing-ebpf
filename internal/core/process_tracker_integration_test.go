@@ -5,10 +5,14 @@ package core
 import (
 	"errors"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	CiliumEBPF "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 )
 
@@ -142,4 +146,180 @@ func assertProcessTrackerSocketReleased(t *testing.T, tracker *ProcessTracker, m
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// replaceDetectCgroup2Root points AttachProcessTracker at a dedicated test
+// cgroup instead of the real cgroup v2 root.
+func replaceDetectCgroup2Root(t *testing.T, path string) {
+	t.Helper()
+	original := detectCgroup2Root
+	detectCgroup2Root = func() (string, error) { return path, nil }
+	t.Cleanup(func() { detectCgroup2Root = original })
+}
+
+// attachExclusiveCreateTestProgram reproduces netd-style unflagged
+// BPF_PROG_ATTACH on the socket-create hook. The ID stays attached after the
+// program FD is closed, and the hook is left in single-program mode.
+func attachExclusiveCreateTestProgram(t *testing.T, cgroupFile *os.File) CiliumEBPF.ProgramID {
+	t.Helper()
+	program, err := CiliumEBPF.NewProgram(&CiliumEBPF.ProgramSpec{
+		Name:         "foreign_create",
+		Type:         CiliumEBPF.CGroupSock,
+		AttachType:   CiliumEBPF.AttachCGroupInetSockCreate,
+		License:      "GPL",
+		Instructions: asm.Instructions{asm.Mov.Imm(asm.R0, 1), asm.Return()},
+	})
+	if err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup sock programs are unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer program.Close()
+	if err := link.RawAttachProgram(link.RawAttachProgramOptions{
+		Target:  int(cgroupFile.Fd()),
+		Program: program,
+		Attach:  CiliumEBPF.AttachCGroupInetSockCreate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := program.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := info.ID()
+	t.Cleanup(func() {
+		if leftover, openErr := CiliumEBPF.NewProgramFromID(id); openErr == nil {
+			_ = rawDetachProgram(int(cgroupFile.Fd()), leftover, CiliumEBPF.AttachCGroupInetSockCreate)
+			_ = leftover.Close()
+		}
+	})
+	return id
+}
+
+func hookProgramNames(t *testing.T, cgroupFile *os.File, attachType CiliumEBPF.AttachType) []string {
+	t.Helper()
+	ids, err := queryCgroupProgramIDs(int(cgroupFile.Fd()), attachType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, id := range ids {
+		program, err := CiliumEBPF.NewProgramFromID(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := program.Info()
+		_ = program.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, info.Name)
+	}
+	return names
+}
+
+func requireCreateHookMulti(t *testing.T, cgroupFile *os.File, context string) {
+	t.Helper()
+	flags, err := queryCgroupHookFlags(int(cgroupFile.Fd()), CiliumEBPF.AttachCGroupInetSockCreate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags&unix.BPF_F_ALLOW_MULTI == 0 {
+		t.Fatalf("%s: create hook flags = %#x, want multi-program mode", context, flags)
+	}
+}
+
+func fullTrackerConfig() ProcessTrackerConfig {
+	// The zero value of Decision is DecisionPass, which would activate the
+	// UID policy marking and require a self-bypass metadata map; these tests
+	// exercise owner recording only.
+	return ProcessTrackerConfig{
+		EnableTCP:  true,
+		EnableUDP:  true,
+		EnableIPv6: true,
+		Default:    DecisionIntercept,
+	}
+}
+
+// Android 15+ netd holds the connect hooks in single-program mode. The
+// socket-create hook must attach anyway so owner recording works, and the
+// refused legacy connect hook must not fail the tracker.
+func TestProcessTrackerCreateHookWithNetdOccupiedConnectIntegration(t *testing.T) {
+	path, cgroupFile := dedicatedHookOwnerCgroup(t, 99)
+	placeholder := newHookOwnerTestProgram(t, "connect4_inet4_")
+	t.Cleanup(func() { _ = placeholder.Close() })
+	netdID := attachLikeNetd(t, cgroupFile, placeholder)
+	replaceDetectCgroup2Root(t, path)
+
+	tracker, err := AttachProcessTracker(fullTrackerConfig())
+	if err != nil {
+		t.Fatalf("attach with netd holding connect4: %v", err)
+	}
+	t.Cleanup(func() { _ = tracker.Close() })
+
+	if !tracker.CreateHook() {
+		t.Fatal("socket-create hook did not attach while netd holds connect4")
+	}
+	// netd keeps its exclusive owner: the tracker must not have touched it.
+	requireConnect4Owners(t, cgroupFile, []CiliumEBPF.ProgramID{netdID}, "after tracker attach")
+	// The create hook stays in multi-program mode so the interception
+	// backend and a later tracker remain attachable.
+	requireCreateHookMulti(t, cgroupFile, "after tracker attach")
+	if names := hookProgramNames(t, cgroupFile, CiliumEBPF.AttachCGroupInetSockCreate); !slices.Contains(names, kernelProgramNameProcessCreate) {
+		t.Fatalf("create hook programs = %v, want %q among them", names, kernelProgramNameProcessCreate)
+	}
+	// The legacy hooks that stayed free supplement the create hook.
+	if names := hookProgramNames(t, cgroupFile, CiliumEBPF.AttachCGroupUDP4Sendmsg); !slices.Contains(names, kernelProgramNameProcessSendmsg4) {
+		t.Fatalf("sendmsg4 programs = %v, want %q among them", names, kernelProgramNameProcessSendmsg4)
+	}
+}
+
+// When something else already occupies the socket-create hook, the legacy
+// connect/sendmsg hooks still carry the tracker: no error and no create hook.
+func TestProcessTrackerFallsBackToLegacyHooksIntegration(t *testing.T) {
+	path, cgroupFile := dedicatedHookOwnerCgroup(t, 101)
+	attachExclusiveCreateTestProgram(t, cgroupFile)
+	replaceDetectCgroup2Root(t, path)
+
+	tracker, err := AttachProcessTracker(fullTrackerConfig())
+	if err != nil {
+		t.Fatalf("attach with an occupied socket-create hook: %v", err)
+	}
+	t.Cleanup(func() { _ = tracker.Close() })
+
+	if tracker.CreateHook() {
+		t.Fatal("tracker reports the socket-create hook although a foreign program owns it")
+	}
+	if owners := hookProgramNames(t, cgroupFile, CiliumEBPF.AttachCGroupInetSockCreate); !slices.Equal(owners, []string{"foreign_create"}) {
+		t.Fatalf("create hook programs = %v, want the foreign owner alone", owners)
+	}
+	if names := hookProgramNames(t, cgroupFile, CiliumEBPF.AttachCGroupUDP4Sendmsg); !slices.Contains(names, kernelProgramNameProcessSendmsg4) {
+		t.Fatalf("sendmsg4 programs = %v, want %q among them", names, kernelProgramNameProcessSendmsg4)
+	}
+}
+
+// Without the create hook the legacy failure semantics stay as they were
+// before it existed: a refused connect hook fails the whole tracker.
+func TestProcessTrackerFailsWhenCreateAndLegacyHooksOccupiedIntegration(t *testing.T) {
+	path, cgroupFile := dedicatedHookOwnerCgroup(t, 102)
+	attachExclusiveCreateTestProgram(t, cgroupFile)
+	placeholder := newHookOwnerTestProgram(t, "connect4_inet4_")
+	t.Cleanup(func() { _ = placeholder.Close() })
+	netdID := attachLikeNetd(t, cgroupFile, placeholder)
+	replaceDetectCgroup2Root(t, path)
+
+	tracker, err := AttachProcessTracker(fullTrackerConfig())
+	if err == nil {
+		_ = tracker.Close()
+		t.Fatal("attach succeeded although the create and connect hooks are occupied")
+	}
+	if !strings.Contains(err.Error(), "socket-create hook") {
+		t.Fatalf("attach error = %v, want the socket-create failure included", err)
+	}
+	if tracker != nil && !tracker.IsClosed() {
+		t.Fatal("failed attach returned an open tracker")
+	}
+	// netd keeps its exclusive connect4 owner after the rollback.
+	requireConnect4Owners(t, cgroupFile, []CiliumEBPF.ProgramID{netdID}, "after rollback")
 }

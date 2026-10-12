@@ -77,6 +77,11 @@ const (
 	kernelProgramNameProcessSendmsg4 = "sb_proc_send4"
 	// sb_proc_send6: process-owner tracking for IPv6 UDP sendmsg.
 	kernelProgramNameProcessSendmsg6 = "sb_proc_send6"
+	// sb_proc_create: process-owner tracking at inet socket creation. The
+	// connect/sendmsg hooks share their hooks with Android netd's
+	// placeholders and cannot attach there; socket creation is the
+	// hook that stays free on those kernels.
+	kernelProgramNameProcessCreate = "sb_proc_create"
 	// sb_proc_release: process-owner socket-release cleanup.
 	kernelProgramNameProcessRelease = "sb_proc_release"
 

@@ -61,14 +61,19 @@ type ProcessTracker struct {
 	programs            []*CiliumEBPF.Program
 	links               []cgroupProgramLink
 	releaseCleanup      bool
+	createHook          bool
 }
+
+// detectCgroup2Root is replaced in tests so AttachProcessTracker can attach
+// to a dedicated test cgroup instead of the real cgroup v2 root.
+var detectCgroup2Root = DetectCgroup2Root
 
 func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) {
 	if !config.EnableTCP && !config.EnableUDP {
 		return nil, E.New("process tracker has no enabled protocol")
 	}
 	memlockErr := raiseMemlockLimit()
-	cgroupPath, err := DetectCgroup2Root()
+	cgroupPath, err := detectCgroup2Root()
 	if err != nil {
 		return nil, E.Cause(err, "detect cgroup v2 root")
 	}
@@ -124,10 +129,22 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 	// Establish cleanup before any hook can publish an application cookie.
 	// Appending it first also keeps cleanup attached until all writers detach.
 	tracker.attachReleaseCleanup(cgroupPath)
+	// Socket creation is the primary owner hook: its attach type never
+	// shares a hook with the connect/sendmsg placeholders Android netd keeps
+	// on the cgroup v2 root, so it stays attachable where the legacy hooks
+	// below are refused. A create failure only matters when no legacy hook
+	// attaches either.
+	createErr := tracker.attachCreateHook(cgroupPath, config)
 	for _, hook := range processTrackerHooks(config) {
 		program, loadErr := newProcessTrackerProgram(hook, owners.FD(), tracker.policyUIDFD(), tracker.metadataFD(), tracker.policyDefaultBypass)
 		if loadErr != nil {
-			return rollbackProcessTracker(tracker, loadErr)
+			if createErr == nil {
+				// The create hook already records every enabled protocol;
+				// a failed legacy hook only loses the connect-time owner
+				// correction for sockets created before the tracker ran.
+				continue
+			}
+			return rollbackProcessTracker(tracker, E.Errors(createErr, loadErr))
 		}
 		tracker.programs = append(tracker.programs, program)
 		// The tracker always uses the cgroup v2 root, which is also the
@@ -137,11 +154,34 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 		// tracker, has no userspace fallback.
 		programLink, attachErr := attachCgroupProgramShared(cgroupPath, program, hook.attachType)
 		if attachErr != nil {
-			return rollbackProcessTracker(tracker, E.Cause(attachErr, "attach eBPF process tracker ", hook.hookName, " hook"))
+			if createErr == nil {
+				continue
+			}
+			return rollbackProcessTracker(tracker, E.Errors(createErr, E.Cause(attachErr, "attach eBPF process tracker ", hook.hookName, " hook")))
 		}
 		tracker.links = append(tracker.links, programLink)
 	}
 	return tracker, nil
+}
+
+// attachCreateHook records process ownership at inet socket creation. A
+// failure is recoverable: the caller keeps the tracker usable through the
+// legacy connect/sendmsg hooks and only fails when those are refused too.
+func (t *ProcessTracker) attachCreateHook(cgroupPath string, config ProcessTrackerConfig) error {
+	program, err := newProcessTrackerCreateProgram(t.owners.FD(), t.policyUIDFD(), t.metadataFD(), t.policyDefaultBypass, config.EnableTCP, config.EnableIPv6)
+	if err != nil {
+		return err
+	}
+	t.programs = append(t.programs, program)
+	// Same shared multi-program policy as the legacy hooks: never convert a
+	// root hook into single-program mode for an optional component.
+	programLink, err := attachCgroupProgramShared(cgroupPath, program, CiliumEBPF.AttachCGroupInetSockCreate)
+	if err != nil {
+		return E.Cause(err, "attach eBPF process tracker socket-create hook")
+	}
+	t.links = append(t.links, programLink)
+	t.createHook = true
+	return nil
 }
 
 // compileUIDDecisions converts final action decisions into the membership map
@@ -202,6 +242,14 @@ func (t *ProcessTracker) ReleaseCleanup() bool {
 	return t != nil && t.releaseCleanup
 }
 
+// CreateHook reports whether the socket-create owner hook attached. The mode
+// string it feeds distinguishes that path from the legacy connect/sendmsg
+// hooks, which is how a device whose root hooks are held by netd placeholders
+// shows up in logs.
+func (t *ProcessTracker) CreateHook() bool {
+	return t != nil && t.createHook
+}
+
 func processTrackerHooks(config ProcessTrackerConfig) []processTrackerHook {
 	var hooks []processTrackerHook
 	if config.EnableTCP {
@@ -249,6 +297,68 @@ func newProcessTrackerReleaseProgram(ownerMapFD, metadataMapFD int) (*CiliumEBPF
 
 func processTrackerReleaseInstructions(ownerMapFD, metadataMapFD int) asm.Instructions {
 	return socketCookieDeleteInstructions(ownerMapFD, metadataMapFD)
+}
+
+// struct bpf_sock field offsets and values used by the socket-create prologue,
+// from include/uapi/linux/bpf.h. The verifier allows reading family and
+// protocol for BPF_CGROUP_INET_SOCK_CREATE and rewrites the loads onto
+// skc_family/sk_protocol; inet_create assigns sk->sk_protocol before it runs
+// BPF_CGROUP_RUN_PROG_INET_SOCK.
+const (
+	bpfSockFamilyOffset   = 4
+	bpfSockProtocolOffset = 12
+	bpfSockFamilyINET6    = 10 // AF_INET6
+	bpfSockProtocolUDP    = 17 // IPPROTO_UDP
+)
+
+func newProcessTrackerCreateProgram(ownerMapFD, policyUIDMapFD, metadataMapFD int, defaultBypass, enableTCP, enableIPv6 bool) (*CiliumEBPF.Program, error) {
+	program, err := CiliumEBPF.NewProgram(processTrackerCreateProgramSpec(ownerMapFD, policyUIDMapFD, metadataMapFD, defaultBypass, enableTCP, enableIPv6))
+	if err != nil {
+		return nil, E.Cause(err, "load eBPF process tracker socket-create hook")
+	}
+	return program, nil
+}
+
+// processTrackerCreateProgramSpec exists as a pure constructor so tests can
+// assert the program type, attach type, and instruction layout without a
+// kernel that can load BPF programs.
+func processTrackerCreateProgramSpec(ownerMapFD, policyUIDMapFD, metadataMapFD int, defaultBypass, enableTCP, enableIPv6 bool) *CiliumEBPF.ProgramSpec {
+	return &CiliumEBPF.ProgramSpec{
+		Name:         kernelProgramNameProcessCreate,
+		Type:         CiliumEBPF.CGroupSock,
+		AttachType:   CiliumEBPF.AttachCGroupInetSockCreate,
+		License:      "GPL",
+		Instructions: processTrackerCreateInstructions(ownerMapFD, policyUIDMapFD, metadataMapFD, defaultBypass, enableTCP, enableIPv6),
+	}
+}
+
+// processTrackerCreateInstructions prepends the family/protocol gates of the
+// socket-create hook to the shared owner-recording body. The gates preserve
+// the legacy hook selection: with TCP enabled every inet socket is recorded
+// (the connect hook used to cover connected UDP too), with TCP disabled only
+// SOCK_DGRAM/IPPROTO_UDP sockets are, and IPv6 sockets follow EnableIPv6.
+// R1 keeps the context across the prologue so the body's cookie read still
+// sees it.
+func processTrackerCreateInstructions(ownerMapFD, policyUIDMapFD, metadataMapFD int, defaultBypass, enableTCP, enableIPv6 bool) asm.Instructions {
+	return append(processTrackerCreatePrologue(enableTCP, enableIPv6),
+		processTrackerInstructions(ownerMapFD, policyUIDMapFD, metadataMapFD, defaultBypass)...)
+}
+
+func processTrackerCreatePrologue(enableTCP, enableIPv6 bool) asm.Instructions {
+	var instructions asm.Instructions
+	if !enableIPv6 {
+		instructions = append(instructions,
+			asm.LoadMem(asm.R2, asm.R1, bpfSockFamilyOffset, asm.Word),
+			asm.JEq.Imm(asm.R2, bpfSockFamilyINET6, "allow"),
+		)
+	}
+	if !enableTCP {
+		instructions = append(instructions,
+			asm.LoadMem(asm.R2, asm.R1, bpfSockProtocolOffset, asm.Word),
+			asm.JNE.Imm(asm.R2, bpfSockProtocolUDP, "allow"),
+		)
+	}
+	return instructions
 }
 
 func processTrackerInstructions(ownerMapFD, policyUIDMapFD, metadataMapFD int, defaultBypass bool) asm.Instructions {

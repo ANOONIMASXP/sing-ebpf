@@ -185,9 +185,13 @@ selection and lease bookkeeping, take an instance mutex. TCX programs carry
 their runtime's priority in a bound marker map and are inserted in priority
 order with a revision-checked anchor.
 
-When `AttachProcessTracker` returns both a tracker and an error, cleanup could
-not detach every legacy cgroup hook. The caller owns that incomplete tracker
-and must retry `Close`; it must not use the tracker for process lookup.
+When `AttachProcessTracker` returns both a tracker and an error, the
+socket-create hook was unavailable and cleanup could not detach every legacy
+cgroup hook. The caller owns that incomplete tracker and must retry `Close`;
+it must not use the tracker for process lookup. When the socket-create hook
+attaches, a legacy hook that fails to load or attach is skipped instead: the
+create hook covers every enabled protocol on its own, so the tracker stays
+usable and `CreateHook` reports which path recorded the owners.
 
 Shared runtime notification callbacks are queued while reconciliation or
 cleanup owns the runtime lock and delivered in the same order after the lock is

@@ -169,7 +169,7 @@ func TestRemoveAssignmentIfMatch(t *testing.T) {
 	}
 }
 
-func TestSweepAssignmentsRemovesOnlyUnchangedObservedEntries(t *testing.T) {
+func TestSweepAssignmentsRemovesOnlyUnchangedStaleEntries(t *testing.T) {
 	backend := newTestAssignmentBackend(t)
 	backend.assignmentCapacity = 64
 	source := netip.MustParseAddrPort("192.0.2.10:53000")
@@ -183,7 +183,11 @@ func TestSweepAssignmentsRemovesOnlyUnchangedObservedEntries(t *testing.T) {
 	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err != nil {
 		t.Fatal(err)
 	}
-	backend.assignmentSeen[key] = time.Now().Add(-time.Minute)
+	value := expected
+	value.LastSeenNS = monotonicNowNS() - uint64(time.Minute)
+	if err = updateMap(backend.assignmentMapFD, unsafe.Pointer(&key), unsafe.Pointer(&value)); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := backend.SweepAssignments(time.Second, 64)
 	if err != nil {

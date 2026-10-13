@@ -280,7 +280,7 @@ func TestEmbeddedTCObjectLayout(t *testing.T) {
 	testEmbeddedObjectLayout(t, loadTC, map[string]objectMapLayout{
 		"tc_control":             {4, 72},
 		"tc_listener_sockets":    {4, 4},
-		"tc_assignment":          {44, 24},
+		"tc_assignment":          {44, 32},
 		"tc_stats":               {4, 8},
 		"tc_self_sockets":        {8, 4},
 		"tc_uid_policy":          {8, 1},

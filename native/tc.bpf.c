@@ -145,10 +145,12 @@ struct sb_tc_assign_key {
 
 struct sb_tc_assign_value {
     __u64 socket_cookie;
+    __u64 last_seen_ns;
     __u32 ifindex;
     __u8 source_mac[6];
     __u8 path;
     __u8 source_mac_valid;
+    __u32 generation;
 };
 
 _Static_assert(sizeof(struct sb_tc_control) == 72, "sb_tc_control ABI size");
@@ -161,9 +163,13 @@ _Static_assert(__builtin_offsetof(struct sb_tc_control, listener_port) == 16,
 _Static_assert(__builtin_offsetof(struct sb_tc_control, force_intercept_ipv6_mask) == 54,
     "sb_tc_control force_intercept_ipv6_mask ABI offset");
 _Static_assert(sizeof(struct sb_tc_assign_key) == 44, "sb_tc_assign_key ABI size");
-_Static_assert(sizeof(struct sb_tc_assign_value) == 24, "sb_tc_assign_value ABI size");
+_Static_assert(sizeof(struct sb_tc_assign_value) == 32, "sb_tc_assign_value ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, socket_cookie) == 0,
     "sb_tc_assign_value socket_cookie ABI offset");
+_Static_assert(__builtin_offsetof(struct sb_tc_assign_value, last_seen_ns) == 8,
+    "sb_tc_assign_value last_seen_ns ABI offset");
+_Static_assert(__builtin_offsetof(struct sb_tc_assign_value, generation) == 28,
+    "sb_tc_assign_value generation ABI offset");
 
 struct ethernet_header {
     __u8 destination[6];
@@ -252,6 +258,12 @@ static void *(*map_lookup)(void *map, const void *key) = (void *)BPF_FUNC_map_lo
 static long (*map_update)(void *map, const void *key, const void *value, __u64 flags) =
     (void *)BPF_FUNC_map_update_elem;
 static long (*map_delete)(void *map, const void *key) = (void *)BPF_FUNC_map_delete_elem;
+static __u64 (*ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
+
+static __u32 next_assignment_generation(const struct sb_tc_assign_value *existing) {
+    if (existing == 0 || existing->generation == 0U || existing->generation == 0xffffffffU) return 1U;
+    return existing->generation + 1U;
+}
 static __u32 (*get_socket_uid)(void *ctx) = (void *)BPF_FUNC_get_socket_uid;
 static __u64 (*get_socket_cookie)(void *ctx) = (void *)BPF_FUNC_get_socket_cookie;
 static long (*redirect)(int ifindex, __u64 flags) = (void *)BPF_FUNC_redirect;
@@ -695,11 +707,14 @@ NOINLINE int assign_socket(struct __sk_buff *skb, const struct sb_tc_control *co
     if (key->protocol == IPPROTO_UDP_VALUE && path == SB_TC_PATH_SHARED)
         assignment_key.interface_index = skb->ifindex;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
+    __u64 now_ns = ktime_get_ns();
     struct sb_tc_assign_value value = {
         .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
+        .last_seen_ns = now_ns,
         .ifindex = skb->ifindex,
         .path = path,
         .source_mac_valid = source_mac_valid,
+        .generation = next_assignment_generation(existing),
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
     bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
@@ -716,6 +731,7 @@ NOINLINE int assign_socket(struct __sk_buff *skb, const struct sb_tc_control *co
         increment_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
         return TC_ACT_SHOT;
     }
+    if (!assignment_changed && existing != 0) existing->last_seen_ns = now_ns;
     return TC_ACT_OK;
 }
 
@@ -734,11 +750,14 @@ NOINLINE int assign_socket_legacy(struct __sk_buff *skb, const struct sb_tc_cont
     if (key->protocol == IPPROTO_UDP_VALUE && path == SB_TC_PATH_SHARED)
         assignment_key.interface_index = skb->ifindex;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
+    __u64 now_ns = ktime_get_ns();
     struct sb_tc_assign_value value = {
         .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
+        .last_seen_ns = now_ns,
         .ifindex = skb->ifindex,
         .path = path,
         .source_mac_valid = source_mac_valid,
+        .generation = next_assignment_generation(existing),
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
     bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
@@ -755,6 +774,7 @@ NOINLINE int assign_socket_legacy(struct __sk_buff *skb, const struct sb_tc_cont
         increment_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
         return TC_ACT_SHOT;
     }
+    if (!assignment_changed && existing != 0) existing->last_seen_ns = now_ns;
     return TC_ACT_OK;
 }
 
@@ -770,11 +790,14 @@ NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control
     struct sb_tc_assign_key assignment_key = *key;
     assignment_key.interface_index = path == SB_TC_PATH_SHARED ? skb->ifindex : 0U;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
+    __u64 now_ns = ktime_get_ns();
     struct sb_tc_assign_value value = {
         .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
+        .last_seen_ns = now_ns,
         .ifindex = skb->ifindex,
         .path = path,
         .source_mac_valid = source_mac_valid,
+        .generation = next_assignment_generation(existing),
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
     bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
@@ -791,14 +814,22 @@ NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control
         increment_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
         return TC_ACT_SHOT;
     }
+    if (!assignment_changed && existing != 0) existing->last_seen_ns = now_ns;
     return TC_ACT_OK;
 }
 
 INLINE void record_local_socket_cookie(const struct sb_tc_assign_key *key, __u64 socket_cookie) {
     if (socket_cookie == 0U) return;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, key);
-    if (existing != 0 && existing->socket_cookie == socket_cookie) return;
-    struct sb_tc_assign_value value = {.socket_cookie = socket_cookie};
+    if (existing != 0 && existing->socket_cookie == socket_cookie) {
+        existing->last_seen_ns = ktime_get_ns();
+        return;
+    }
+    struct sb_tc_assign_value value = {
+        .socket_cookie = socket_cookie,
+        .last_seen_ns = ktime_get_ns(),
+        .generation = next_assignment_generation(existing),
+    };
     map_update(&tc_assignment, key, &value, BPF_ANY);
 }
 

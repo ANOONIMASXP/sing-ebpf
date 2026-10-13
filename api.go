@@ -32,6 +32,7 @@ type (
 	SharedPacketRewriteFlowHandle  = core.SharedPacketRewriteFlowHandle
 	SharedPacketRewriteSweepResult = core.SharedPacketRewriteSweepResult
 	TCAssignment                   = core.TCAssignment
+	TCAssignmentSweepResult        = core.TCAssignmentSweepResult
 	TCStats                        = core.TCStats
 	TCLinkFraming                  = core.TCLinkFraming
 	AttachmentInfo                 = core.AttachmentInfo
@@ -288,6 +289,10 @@ func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.A
 
 func (b *TCBackend) RemoveAssignmentIfMatch(protocol uint8, source, destination netip.AddrPort, interfaceIndex uint32, expected TCAssignment) (bool, error) {
 	return core.UnwrapTCBackend(b).RemoveAssignmentIfMatch(protocol, source, destination, interfaceIndex, expected)
+}
+
+func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint32) (TCAssignmentSweepResult, error) {
+	return core.UnwrapTCBackend(b).SweepAssignments(maxIdle, fallbackBudget)
 }
 
 func (b *TCBackend) Stats() (TCStats, error) {

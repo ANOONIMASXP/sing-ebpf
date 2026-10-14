@@ -26,8 +26,11 @@ const (
 )
 
 const (
-	tcAssignmentCapacity        = 65536
-	CompactTCAssignmentCapacity = 16384
+	// Assignment maps hold active local/shared flow state. Keep enough headroom
+	// for bursts without reserving the oversized legacy Linux default on every
+	// device. Platform-specific compact capacity is selected by sing-box.
+	tcAssignmentCapacity        = 32768
+	CompactTCAssignmentCapacity = 8192
 	tcPortPolicyCapacity        = 4096
 )
 

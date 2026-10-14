@@ -19,8 +19,11 @@ import (
 )
 
 const (
-	selfBypassSocketCapacity        = 65536
-	CompactSelfBypassSocketCapacity = 16384
+	// Socket-cookie entries are short-lived runtime state. The LRU fallback
+	// bounds stale entries, so use a smaller default while retaining room for
+	// normal concurrent sockets.
+	selfBypassSocketCapacity        = 16384
+	CompactSelfBypassSocketCapacity = 8192
 )
 
 // SelfBypass owns the socket-cookie map used by the local TC classifier. The

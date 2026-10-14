@@ -193,7 +193,7 @@ func TestSweepAssignmentsRemovesOnlyUnchangedStaleEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Removed != 1 || !result.Complete {
+	if result.Removed != 1 || !result.Complete || !result.UsageKnown || result.Failure != "" {
 		t.Fatalf("unexpected sweep result: %+v", result)
 	}
 	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err == nil {

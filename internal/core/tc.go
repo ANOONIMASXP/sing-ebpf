@@ -165,7 +165,18 @@ type TCAssignmentSweepResult struct {
 	// traversal must not be interpreted as an empty map by callers.
 	UsageKnown bool
 	Pressure   bool
+	// Failure classifies a failed maintenance pass without requiring callers
+	// to parse platform-specific errno text. An empty value means the pass
+	// completed (or is a normal partial traversal).
+	Failure string
 }
+
+const (
+	TCAssignmentSweepFailureClosed = "closed"
+	TCAssignmentSweepFailureScan   = "scan"
+	TCAssignmentSweepFailureLookup = "lookup"
+	TCAssignmentSweepFailureDelete = "delete"
+)
 
 type tcAssignmentSweepEntry struct {
 	key   tcAssignKey
@@ -691,7 +702,7 @@ func (b *TCBackend) RemoveAssignmentIfMatch(
 // assignment for the same key.
 func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint32) (TCAssignmentSweepResult, error) {
 	if b == nil {
-		return TCAssignmentSweepResult{}, errBackendClosed
+		return TCAssignmentSweepResult{Failure: TCAssignmentSweepFailureClosed}, errBackendClosed
 	}
 	if maxIdle <= 0 || fallbackBudget == 0 {
 		return TCAssignmentSweepResult{}, unix.EINVAL
@@ -701,12 +712,13 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	b.access.RLock()
 	defer b.access.RUnlock()
 	if b.runtime == nil || b.runtime.maps["tc_assignment"] == nil {
-		return TCAssignmentSweepResult{}, errBackendClosed
+		return TCAssignmentSweepResult{Failure: TCAssignmentSweepFailureClosed}, errBackendClosed
 	}
 	result := TCAssignmentSweepResult{Usage: MapUsage{Capacity: b.assignmentCapacity}}
 	now := monotonicNowNS()
 	maxIdleNS := uint64(maxIdle)
 	if now <= maxIdleNS {
+		result.UsageKnown = true
 		return result, nil
 	}
 	staleBefore := now - maxIdleNS
@@ -720,6 +732,7 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 		},
 	)
 	if err != nil {
+		result.Failure = TCAssignmentSweepFailureScan
 		return result, err
 	}
 	result.Scanned, result.Complete = scan.Scanned, scan.Complete
@@ -729,12 +742,14 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 			if errors.Is(err, unix.ENOENT) {
 				continue
 			}
+			result.Failure = TCAssignmentSweepFailureLookup
 			return result, err
 		}
 		if current != candidate.value {
 			continue
 		}
 		if err = deleteMap(b.assignmentMapFD, unsafe.Pointer(&candidate.key)); err != nil && !errors.Is(err, unix.ENOENT) {
+			result.Failure = TCAssignmentSweepFailureDelete
 			return result, err
 		}
 		result.Removed++

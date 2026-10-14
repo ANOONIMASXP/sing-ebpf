@@ -161,6 +161,10 @@ type TCAssignmentSweepResult struct {
 	Scanned  uint32
 	Removed  uint32
 	Complete bool
+	// UsageKnown is true only after a complete traversal. A bounded partial
+	// traversal must not be interpreted as an empty map by callers.
+	UsageKnown bool
+	Pressure   bool
 }
 
 type tcAssignmentSweepEntry struct {
@@ -742,6 +746,8 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 		} else {
 			result.Usage.Entries -= result.Removed
 		}
+		result.UsageKnown = true
+		result.Pressure = uint64(result.Usage.Entries)*100 >= uint64(result.Usage.Capacity)*70
 	}
 	return result, nil
 }

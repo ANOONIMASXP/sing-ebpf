@@ -52,6 +52,7 @@ type (
 	KernelProbeReport              = core.KernelProbeReport
 	RuntimeProgram                 = core.RuntimeProgram
 	RuntimeState                   = core.RuntimeState
+	MapCategory                    = core.MapCategory
 	MapOccupancy                   = core.MapOccupancy
 	MapOccupancyReport             = core.MapOccupancyReport
 	UDPStateDiagnostics            = core.UDPStateDiagnostics
@@ -82,6 +83,8 @@ const (
 	CompactSelfBypassSocketCapacity          = core.CompactSelfBypassSocketCapacity
 	CompactTCAssignmentCapacity              = core.CompactTCAssignmentCapacity
 	MaxConfigurableMapCapacity               = core.MaxConfigurableMapCapacity
+	MapCategoryRuntime                       = core.MapCategoryRuntime
+	MapCategoryConfiguredPolicy              = core.MapCategoryConfiguredPolicy
 
 	DefaultTCRoutingMark = core.DefaultTCRoutingMark
 	TCPathShared         = core.TCPathShared

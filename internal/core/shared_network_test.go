@@ -57,8 +57,11 @@ func TestSharedNetworkCloseClearsFlowBookkeeping(t *testing.T) {
 }
 
 func TestSharedNetworkABI(t *testing.T) {
-	if size := unsafe.Sizeof(sharedPacketRewriteControl{}); size != 80 {
+	if size := unsafe.Sizeof(sharedPacketRewriteControl{}); size != 120 {
 		t.Fatalf("unexpected shared-network control size: %d", size)
+	}
+	if offset := unsafe.Offsetof(sharedPacketRewriteControl{}.ForceIntercept); offset != 40 {
+		t.Fatalf("unexpected shared-network ForceIntercept offset: %d", offset)
 	}
 	if size := unsafe.Sizeof(sharedNetworkListenerKey{}); size != 40 {
 		t.Fatalf("unexpected shared-network listener key size: %d", size)

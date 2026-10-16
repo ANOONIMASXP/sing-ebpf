@@ -85,6 +85,7 @@ const (
 	MaxConfigurableMapCapacity               = core.MaxConfigurableMapCapacity
 	MapCategoryRuntime                       = core.MapCategoryRuntime
 	MapCategoryConfiguredPolicy              = core.MapCategoryConfiguredPolicy
+	ForceInterceptPrefixesPerFamily          = core.ForceInterceptPrefixesPerFamily
 
 	DefaultTCRoutingMark = core.DefaultTCRoutingMark
 	TCPathShared         = core.TCPathShared

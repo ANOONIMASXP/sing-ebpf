@@ -6,6 +6,8 @@
 
 #include <linux/types.h>
 
+#include "force_intercept_slot.h"
+
 #define SB_EBPF_ORIGINAL_DST_FLAG_CONNECTED_UDP 1U
 
 #define SB_EBPF_PROTO_TCP 6U
@@ -37,6 +39,8 @@
 #define SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV6 (1U << 16U)
 #define SB_EBPF_CGROUP_FLAG_BYPASS_PORT (1U << 17U)
 #define SB_EBPF_CGROUP_FLAG_UDP_RELEASE_NOTIFY (1U << 18U)
+#define SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_SLOT1_IPV4 (1U << 19U)
+#define SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_SLOT1_IPV6 (1U << 20U)
 struct sb_ebpf_cgroup_control {
     __u32 flags;
     __u32 network_generation;
@@ -46,13 +50,12 @@ struct sb_ebpf_cgroup_control {
     __u16 listener_port;
     __u16 dns_mode;
     __u8 redirect_ipv6_prefix[8];
-    __u8 force_intercept_ipv4_prefix[4];
-    __u8 force_intercept_ipv4_mask[4];
-    __u8 force_intercept_ipv6_prefix[16];
-    __u8 force_intercept_ipv6_mask[16];
+    struct sb_ebpf_force_intercept_slot force_intercept[SB_EBPF_FORCE_INTERCEPT_SLOTS];
 };
 
-_Static_assert(sizeof(struct sb_ebpf_cgroup_control) == 72U, "unexpected cgroup control ABI");
+_Static_assert(sizeof(struct sb_ebpf_cgroup_control) == 112U, "unexpected cgroup control ABI");
+_Static_assert(__builtin_offsetof(struct sb_ebpf_cgroup_control, force_intercept) == 32U,
+    "unexpected cgroup force-intercept ABI");
 _Static_assert(__builtin_offsetof(struct sb_ebpf_cgroup_control, network_generation) == 4U,
     "unexpected cgroup network generation ABI");
 

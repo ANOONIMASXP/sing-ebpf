@@ -240,7 +240,11 @@ disabled and interface filters are detached.
 
 The programs first apply path-specific address-family, protocol, fragment,
 service-traffic, and safety gates. Application-supplied force-intercept prefixes
-force interception before other policy. DNS `off` bypasses and DNS `hijack`
+force interception before other policy. A policy may carry two force-intercept
+prefixes per address family, taken from the intercept destination decisions of
+both scopes together; every interception path checks both. ICMP echo reply
+answers only the prefix whose decision sets `EchoReply`, or a family's sole
+prefix when no decision does. DNS `off` bypasses and DNS `hijack`
 intercepts before UID or shared source
 policy. DNS `respect_policy` applies UID/source policy first, then intercepts
 before host, private-address, and destination-CIDR bypass. Other traffic applies

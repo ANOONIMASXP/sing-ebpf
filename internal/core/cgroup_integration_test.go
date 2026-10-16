@@ -307,6 +307,104 @@ func TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass(t *testing.T) {
 	assertUDPNotReceived(t, token)
 }
 
+// TestCgroupForceInterceptSlotsIntegration requires both force-intercept slots
+// of a family to override a pass default, while other destinations keep it.
+func TestCgroupForceInterceptSlotsIntegration(t *testing.T) {
+	requireEBPFIntegration(t, "test cgroup force-intercept slots")
+	cgroupRoot, err := DetectCgroup2Root()
+	if err != nil {
+		t.Skipf("cgroup v2 is unavailable: %v", err)
+	}
+	path, dedicated := createIntegrationCgroup(t, cgroupRoot, 102)
+	if !dedicated {
+		t.Skip("cannot create a dedicated cgroup")
+	}
+	policy, err := CompileActionPolicy(ActionPolicy{
+		EnableUDP: true,
+		Local: ActionScope{
+			Default: DecisionPass,
+			DestinationCIDR: []CIDRDecision{
+				{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept, EchoReply: true},
+				{Prefix: netip.MustParsePrefix("100.64.0.0/10"), Action: DecisionIntercept},
+			},
+		},
+		Shared: ActionScope{Default: DecisionIntercept},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfBypassMap, err := CiliumEBPF.NewMap(&CiliumEBPF.MapSpec{
+		Type:       CiliumEBPF.LRUHash,
+		KeySize:    8,
+		ValueSize:  4,
+		MaxEntries: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer selfBypassMap.Close()
+	backend, err := PrepareCgroup(CgroupConfig{
+		Path:          path,
+		EnableUDP:     true,
+		RedirectIPv4:  netip.MustParsePrefix("127.128.0.0/9"),
+		MapCapacity:   CgroupMapCapacity{TCPRedirect: 64, UDPRedirect: 64, UDPPeer: 64, UDPFlow: 64, SocketBypass: 8},
+		UDPTimeout:    time.Minute,
+		Policy:        policy,
+		SelfBypassMap: selfBypassMap,
+	})
+	if err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup eBPF is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	const listenerPort = 41020
+	if err = backend.LoadPrograms(listenerPort); err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup program loading is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err = backend.Attach(); err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup program attach is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	moveCurrentProcessToCgroup(t, path, cgroupRoot)
+
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: listenerPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	for _, testCase := range []struct {
+		destination string
+		intercepted bool
+	}{
+		{"198.18.0.7:9", true},
+		{"100.64.0.7:9", true},
+		{"203.0.113.7:9", false},
+	} {
+		t.Run(testCase.destination, func(t *testing.T) {
+			sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sender.Close()
+			// A passed datagram may have no route; only an intercepted one is
+			// redirected to the loopback listener.
+			_, _ = sender.WriteToUDPAddrPort([]byte(testCase.destination), netip.MustParseAddrPort(testCase.destination))
+			if testCase.intercepted {
+				assertUDPReceived(t, listener, testCase.destination)
+			} else {
+				assertUDPNotReceived(t, listener)
+			}
+		})
+	}
+}
+
 // TestCgroupUDPFlowCacheRevalidatesRedirect covers a cached proxy decision
 // whose redirect entry is gone, as after an LRU eviction, or now records
 // another flow, as when that flow claimed the freed token. The cache must not

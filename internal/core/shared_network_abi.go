@@ -37,20 +37,17 @@ type sharedNetworkMACKey struct {
 }
 
 type sharedPacketRewriteControl struct {
-	Enabled                  uint32
-	Flags                    uint32
-	ListenerPort             uint16
-	DNSMode                  DNSMode
-	TokenIPv4Prefix          [4]byte
-	TokenIPv4PrefixBits      uint8
-	TokenIPv6PrefixBits      uint8
-	Reserved2                [2]byte
-	TokenIPv6Prefix          [16]byte
-	UDPTimeoutSeconds        uint32
-	ForceInterceptIPv4Prefix [4]byte
-	ForceInterceptIPv4Mask   [4]byte
-	ForceInterceptIPv6Prefix [16]byte
-	ForceInterceptIPv6Mask   [16]byte
+	Enabled             uint32
+	Flags               uint32
+	ListenerPort        uint16
+	DNSMode             DNSMode
+	TokenIPv4Prefix     [4]byte
+	TokenIPv4PrefixBits uint8
+	TokenIPv6PrefixBits uint8
+	Reserved2           [2]byte
+	TokenIPv6Prefix     [16]byte
+	UDPTimeoutSeconds   uint32
+	ForceIntercept      [forceInterceptSlots]forceInterceptSlot
 }
 
 func sharedNetworkUDPTimeoutSeconds(timeout time.Duration) (uint32, error) {
@@ -158,6 +155,8 @@ const (
 	_
 	sharedPacketRewriteFlagForceInterceptIPv4
 	sharedPacketRewriteFlagForceInterceptIPv6
+	sharedPacketRewriteFlagForceInterceptSlot1IPv4
+	sharedPacketRewriteFlagForceInterceptSlot1IPv6
 )
 
 const sharedNetworkPolicyFlags = sharedPacketRewriteFlagHostIPv4 |

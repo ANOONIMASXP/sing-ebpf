@@ -181,12 +181,7 @@ NOINLINE int ingress_ipv4(
     if (sb_ebpf_ipv4_safety_bypass((const __u8 *)&ip->destination)) {
         return shared_ingress_pass();
     }
-    bool force_intercept = sb_ebpf_force_intercept_ipv4(
-        (const __u8 *)&ip->destination,
-        control->flags,
-        SB_SHARED_FLAG_FORCE_INTERCEPT_IPV4,
-        control->force_intercept_ipv4_prefix,
-        control->force_intercept_ipv4_mask);
+    bool force_intercept = shared_force_intercept_ipv4(&scratch->original, control);
     __u8 dns_policy = force_intercept
         ? SB_SHARED_POLICY_PROXY
         : shared_dns_policy(protocol, source_port, destination_port, control);
@@ -410,12 +405,7 @@ NOINLINE int ingress_ipv6(
     if (sb_ebpf_ipv6_safety_bypass(ip->destination)) {
         return shared_ingress_pass();
     }
-    bool force_intercept = sb_ebpf_force_intercept_ipv6(
-        ip->destination,
-        control->flags,
-        SB_SHARED_FLAG_FORCE_INTERCEPT_IPV6,
-        control->force_intercept_ipv6_prefix,
-        control->force_intercept_ipv6_mask);
+    bool force_intercept = shared_force_intercept_ipv6(&scratch->original, control);
     __u8 dns_policy = force_intercept
         ? SB_SHARED_POLICY_PROXY
         : shared_dns_policy(protocol, source_port, destination_port, control);

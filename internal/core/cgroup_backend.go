@@ -121,8 +121,7 @@ type CgroupBackend struct {
 	cgroupPath              string
 	redirectIPv4            netip.Prefix
 	redirectIPv6            netip.Prefix
-	forceInterceptIPv4      netip.Prefix
-	forceInterceptIPv6      netip.Prefix
+	forceIntercept          forceInterceptPolicy
 	enableIPv6              bool
 	enableUDP               bool
 	dnsMode                 DNSMode
@@ -139,8 +138,6 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 	mapCapacity := config.MapCapacity
 	policy := config.Policy
 	var err error
-	forceInterceptIPv4 := policy.forceInterceptIPv4
-	forceInterceptIPv6 := policy.forceInterceptIPv6
 	if err := validateCgroupMapCapacity(mapCapacity); err != nil {
 		return nil, err
 	}
@@ -279,8 +276,7 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 		cgroupPath:           cgroupPath,
 		redirectIPv4:         redirectIPv4,
 		redirectIPv6:         redirectIPv6,
-		forceInterceptIPv4:   forceInterceptIPv4,
-		forceInterceptIPv6:   forceInterceptIPv6,
+		forceIntercept:       policy.forceIntercept,
 		enableIPv6:           config.EnableIPv6,
 		enableUDP:            config.EnableUDP,
 		dnsMode:              policy.localDNSMode,

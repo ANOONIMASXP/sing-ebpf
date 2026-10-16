@@ -37,7 +37,10 @@ route-rule objects, package names, or a consumer's API schema.
 
 Force-intercept prefixes are deliberately generic. They allow a consumer to
 give selected destinations precedence over ordinary bypass policy without the
-library learning why those prefixes are special.
+library learning why those prefixes are special. Each control holds two prefix
+slots per address family, so a FakeIP range and one other range of the same
+family can both be intercepted; the consumer marks which prefix the ICMP echo
+responder answers.
 
 ## Atomic ownership units
 

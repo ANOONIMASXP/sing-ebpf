@@ -27,6 +27,11 @@ func (d Decision) Valid() bool {
 type CIDRDecision struct {
 	Prefix netip.Prefix
 	Action Decision
+	// EchoReply selects an intercept destination prefix as the one whose ICMP
+	// echo requests are answered locally when ICMP echo reply is enabled. When
+	// no decision of an address family sets it, a sole intercept prefix of
+	// that family is answered.
+	EchoReply bool
 }
 
 // PortDecision is a protocol/port match with an already compiled final

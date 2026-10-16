@@ -85,8 +85,6 @@ func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConf
 	redirectIPv4 := config.RedirectIPv4
 	redirectIPv6 := config.RedirectIPv6
 	policy := config.Policy
-	forceInterceptIPv4 := policy.forceInterceptIPv4
-	forceInterceptIPv6 := policy.forceInterceptIPv6
 	for name, capacity := range map[string]uint32{
 		"shared-network proxy":  config.MapCapacity.Proxy,
 		"shared-network bypass": config.MapCapacity.Bypass,
@@ -195,8 +193,8 @@ func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConf
 		ExcludeSource:       len(policy.excludeSource.ipv4)+len(policy.excludeSource.ipv6) > 0,
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,
 		ExcludeSourceMAC:    len(policy.excludeSourceMAC) > 0,
-		ForceInterceptIPv4:  forceInterceptIPv4.IsValid(),
-		ForceInterceptIPv6:  forceInterceptIPv6.IsValid(),
+		ForceInterceptIPv4:  policy.forceIntercept.enabledIPv4(),
+		ForceInterceptIPv6:  policy.forceIntercept.enabledIPv6(),
 	}).sharedFlags()
 	if redirectIPv4.IsValid() {
 		backend.control.TokenIPv4Prefix = redirectIPv4.Addr().As4()
@@ -206,14 +204,7 @@ func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConf
 		backend.control.TokenIPv6Prefix = redirectIPv6.Addr().As16()
 		backend.control.TokenIPv6PrefixBits = uint8(redirectIPv6.Bits())
 	}
-	if forceInterceptIPv4.IsValid() {
-		backend.control.ForceInterceptIPv4Prefix = forceInterceptIPv4.Addr().As4()
-		backend.control.ForceInterceptIPv4Mask = prefixMask4(forceInterceptIPv4.Bits())
-	}
-	if forceInterceptIPv6.IsValid() {
-		backend.control.ForceInterceptIPv6Prefix = forceInterceptIPv6.Addr().As16()
-		backend.control.ForceInterceptIPv6Mask = prefixMask16(forceInterceptIPv6.Bits())
-	}
+	backend.control.ForceIntercept = policy.forceIntercept.controlSlots()
 	if err = backend.initializeSourceCIDRPolicy(policy.includeSource, policy.excludeSource); err != nil {
 		_ = backend.Close()
 		return nil, err
@@ -241,7 +232,8 @@ func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConf
 	}
 	if config.ICMPEchoReply {
 		backend.icmpEchoReply, err = PrepareICMPEchoReply(
-			redirectIPv4.IsValid(), false, redirectIPv6.IsValid(), forceInterceptIPv4, forceInterceptIPv6,
+			redirectIPv4.IsValid(), false, redirectIPv6.IsValid(),
+			policy.forceIntercept.echoReplyIPv4, policy.forceIntercept.echoReplyIPv6,
 		)
 		if err != nil {
 			_ = backend.Close()

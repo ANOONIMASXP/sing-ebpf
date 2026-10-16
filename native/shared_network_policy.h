@@ -113,6 +113,35 @@ NOINLINE __u8 shared_dns_policy(
     return SB_SHARED_POLICY_RESPECT_SOURCE;
 }
 
+// The force-intercept slots are matched in subprograms of their own, so that
+// their per-slot flag branches leave only the result in the verifier state of
+// the ingress program, which 4.19 explores close to its complexity limit.
+NOINLINE bool shared_force_intercept_ipv4(
+    const struct sb_shared_original_key *original,
+    const struct sb_shared_control *control) {
+    return sb_ebpf_force_intercept_slots_ipv4(
+        original->original_addr,
+        control->flags,
+        SB_SHARED_FLAG_FORCE_INTERCEPT_IPV4,
+        SB_SHARED_FLAG_FORCE_INTERCEPT_SLOT1_IPV4,
+        control->force_intercept);
+}
+
+NOINLINE bool shared_force_intercept_ipv6(
+    const struct sb_shared_original_key *original,
+    const struct sb_shared_control *control) {
+    return sb_ebpf_force_intercept_slots_ipv6(
+        original->original_addr,
+        control->flags,
+        SB_SHARED_FLAG_FORCE_INTERCEPT_IPV6,
+        SB_SHARED_FLAG_FORCE_INTERCEPT_SLOT1_IPV6,
+        control->force_intercept);
+}
+
+// The destination policies run only for traffic the ingress program did not
+// already send to the proxy, so a force-intercept prefix never reaches them.
+// Leaving that check to the caller keeps these subprograms within the 4.19
+// verifier complexity limit.
 NOINLINE __u8 ipv4_policy(
     const __u8 destination[4],
     __u8 protocol,
@@ -126,12 +155,6 @@ NOINLINE __u8 ipv4_policy(
     __builtin_memcpy(key.addr, destination, 4U);
     if ((map_policy_flags & SB_SHARED_FLAG_HOST_IPV4) != 0U &&
         map_lookup(&shared_host_ipv4, &key) != 0) return SB_SHARED_POLICY_BYPASS;
-    if (sb_ebpf_force_intercept_ipv4(
-        destination,
-        control->flags,
-        SB_SHARED_FLAG_FORCE_INTERCEPT_IPV4,
-        control->force_intercept_ipv4_prefix,
-        control->force_intercept_ipv4_mask)) return SB_SHARED_POLICY_PROXY;
     if ((control->flags & SB_SHARED_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
         sb_ebpf_ipv4_private_address(destination)) return SB_SHARED_POLICY_BYPASS;
     if (map_policy_flags == 0U) return SB_SHARED_POLICY_PROXY;
@@ -155,12 +178,6 @@ NOINLINE __u8 ipv6_policy(
     if ((map_policy_flags & SB_SHARED_FLAG_HOST_IPV6) != 0U && map_lookup(&shared_host_ipv6, &key) != 0) {
         return SB_SHARED_POLICY_BYPASS;
     }
-    if (sb_ebpf_force_intercept_ipv6(
-        destination,
-        control->flags,
-        SB_SHARED_FLAG_FORCE_INTERCEPT_IPV6,
-        control->force_intercept_ipv6_prefix,
-        control->force_intercept_ipv6_mask)) return SB_SHARED_POLICY_PROXY;
     if ((control->flags & SB_SHARED_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
         sb_ebpf_ipv6_private_address(destination)) return SB_SHARED_POLICY_BYPASS;
     if (map_policy_flags == 0U) return SB_SHARED_POLICY_PROXY;

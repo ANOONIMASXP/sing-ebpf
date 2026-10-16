@@ -28,8 +28,10 @@ type policyVector struct {
 	IncludeSourceMAC    bool
 	ExcludeSourceMAC    bool
 	BypassFlowCache     bool
-	ForceInterceptIPv4  bool
-	ForceInterceptIPv6  bool
+	// ForceInterceptIPv4 and ForceInterceptIPv6 report which force-intercept
+	// slots hold a prefix.
+	ForceInterceptIPv4 [forceInterceptSlots]bool
+	ForceInterceptIPv6 [forceInterceptSlots]bool
 }
 
 func (v policyVector) tcFlags() uint32 {
@@ -67,12 +69,8 @@ func (v policyVector) tcFlags() uint32 {
 	if v.BypassIPv6 {
 		flags |= 1 << 9
 	}
-	if v.ForceInterceptIPv4 {
-		flags |= 1 << 10
-	}
-	if v.ForceInterceptIPv6 {
-		flags |= 1 << 11
-	}
+	flags |= forceInterceptFlags(v.ForceInterceptIPv4, tcFlagForceInterceptIPv4, tcFlagForceInterceptSlot1IPv4)
+	flags |= forceInterceptFlags(v.ForceInterceptIPv6, tcFlagForceInterceptIPv6, tcFlagForceInterceptSlot1IPv6)
 	if v.IncludeSource {
 		flags |= 1 << 12
 	}
@@ -141,12 +139,8 @@ func (v policyVector) cgroupFlags() uint32 {
 	if v.HostIPv6 {
 		flags |= cgroupFlagHostIPv6
 	}
-	if v.ForceInterceptIPv4 {
-		flags |= cgroupFlagForceInterceptIPv4
-	}
-	if v.ForceInterceptIPv6 {
-		flags |= cgroupFlagForceInterceptIPv6
-	}
+	flags |= forceInterceptFlags(v.ForceInterceptIPv4, cgroupFlagForceInterceptIPv4, cgroupFlagForceInterceptSlot1IPv4)
+	flags |= forceInterceptFlags(v.ForceInterceptIPv6, cgroupFlagForceInterceptIPv6, cgroupFlagForceInterceptSlot1IPv6)
 	if v.LocalBypassPort {
 		flags |= cgroupFlagBypassPort
 	}
@@ -200,11 +194,21 @@ func (v policyVector) sharedFlags() uint32 {
 	if v.BypassFlowCache {
 		flags |= sharedPacketRewriteFlagBypassFlowCache
 	}
-	if v.ForceInterceptIPv4 {
-		flags |= sharedPacketRewriteFlagForceInterceptIPv4
-	}
-	if v.ForceInterceptIPv6 {
-		flags |= sharedPacketRewriteFlagForceInterceptIPv6
+	flags |= forceInterceptFlags(v.ForceInterceptIPv4,
+		sharedPacketRewriteFlagForceInterceptIPv4, sharedPacketRewriteFlagForceInterceptSlot1IPv4)
+	flags |= forceInterceptFlags(v.ForceInterceptIPv6,
+		sharedPacketRewriteFlagForceInterceptIPv6, sharedPacketRewriteFlagForceInterceptSlot1IPv6)
+	return flags
+}
+
+// forceInterceptFlags encodes which force-intercept slots are in use with the
+// per-slot flags of one data plane.
+func forceInterceptFlags(enabled [forceInterceptSlots]bool, slotFlags ...uint32) uint32 {
+	var flags uint32
+	for index, slotEnabled := range enabled {
+		if slotEnabled {
+			flags |= slotFlags[index]
+		}
 	}
 	return flags
 }

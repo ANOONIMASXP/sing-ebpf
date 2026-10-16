@@ -167,8 +167,11 @@ func TestCompileActionPolicySnapshot(t *testing.T) {
 		len(policy.localBypassPortEntries) != 2 {
 		t.Fatalf("compiled policy omitted configured rules: %+v", policy)
 	}
-	if policy.forceInterceptIPv4 != netip.MustParsePrefix("198.18.0.0/15") {
-		t.Fatalf("ForceIntercept prefix was not normalized: %s", policy.forceInterceptIPv4)
+	if policy.forceIntercept.ipv4[0] != netip.MustParsePrefix("198.18.0.0/15") {
+		t.Fatalf("ForceIntercept prefix was not normalized: %s", policy.forceIntercept.ipv4[0])
+	}
+	if policy.forceIntercept.echoReplyIPv4 != policy.forceIntercept.ipv4[0] {
+		t.Fatalf("sole ForceIntercept prefix is not answered by echo reply: %+v", policy.forceIntercept)
 	}
 	includeUID[0].Start = 2000
 	includeSource[0] = netip.MustParsePrefix("203.0.113.0/24")
@@ -210,6 +213,93 @@ func TestCompileActionPolicyStillRejectsNonDNSPortInterceptWithUIDPassDefault(t 
 	})
 	if err == nil {
 		t.Fatal("non-DNS port intercept unexpectedly overrode a pass default")
+	}
+}
+
+// TestCompileActionPolicyForceInterceptSlots covers a FakeIP range sharing the
+// force-intercept slots with a second destination of the same family: both
+// scopes' prefixes are merged, the echo-reply prefix takes slot 0, and only it
+// is answered by ICMP echo reply.
+func TestCompileActionPolicyForceInterceptSlots(t *testing.T) {
+	fakeIPv4 := netip.MustParsePrefix("198.18.0.0/15")
+	tailnetIPv4 := netip.MustParsePrefix("100.64.0.0/10")
+	fakeIPv6 := netip.MustParsePrefix("fc00::/18")
+	tailnetIPv6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+	policy, err := CompileActionPolicy(ActionPolicy{
+		EnableTCP: true,
+		Local: ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{
+			{Prefix: netip.MustParsePrefix("100.64.1.1/10"), Action: DecisionIntercept},
+			{Prefix: fakeIPv4, Action: DecisionIntercept, EchoReply: true},
+			{Prefix: fakeIPv6, Action: DecisionIntercept, EchoReply: true},
+		}},
+		Shared: ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{
+			{Prefix: fakeIPv4, Action: DecisionIntercept, EchoReply: true},
+			{Prefix: tailnetIPv6, Action: DecisionIntercept},
+			{Prefix: fakeIPv6, Action: DecisionIntercept, EchoReply: true},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := forceInterceptPolicy{
+		ipv4:          [forceInterceptSlots]netip.Prefix{fakeIPv4, tailnetIPv4},
+		ipv6:          [forceInterceptSlots]netip.Prefix{fakeIPv6, tailnetIPv6},
+		echoReplyIPv4: fakeIPv4,
+		echoReplyIPv6: fakeIPv6,
+	}
+	if policy.forceIntercept != want {
+		t.Fatalf("force-intercept policy = %+v, want %+v", policy.forceIntercept, want)
+	}
+	if enabled := policy.forceIntercept.enabledIPv4(); enabled != [forceInterceptSlots]bool{true, true} {
+		t.Fatalf("IPv4 force-intercept slots enabled = %v", enabled)
+	}
+	slots := policy.forceIntercept.controlSlots()
+	if slots[1].IPv4Prefix != [4]byte{100, 64, 0, 0} || slots[1].IPv4Mask != [4]byte{255, 192, 0, 0} {
+		t.Fatalf("second IPv4 slot = %+v", slots[1])
+	}
+
+	unselected, err := CompileActionPolicy(ActionPolicy{
+		Local: ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{
+			{Prefix: fakeIPv4, Action: DecisionIntercept},
+			{Prefix: tailnetIPv4, Action: DecisionIntercept},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unselected.forceIntercept.echoReplyIPv4.IsValid() {
+		t.Fatalf("echo reply chose %s although no decision selected one of two prefixes",
+			unselected.forceIntercept.echoReplyIPv4)
+	}
+}
+
+func TestCompileActionPolicyRejectsInvalidForceIntercept(t *testing.T) {
+	intercept := func(prefix string, echoReply bool) CIDRDecision {
+		return CIDRDecision{Prefix: netip.MustParsePrefix(prefix), Action: DecisionIntercept, EchoReply: echoReply}
+	}
+	for name, policy := range map[string]ActionPolicy{
+		"more prefixes than slots": {
+			Local:  ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{intercept("198.18.0.0/15", true), intercept("100.64.0.0/10", false)}},
+			Shared: ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{intercept("203.0.113.0/24", false)}},
+		},
+		"two echo-reply prefixes": {
+			Local:  ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{intercept("198.18.0.0/15", true)}},
+			Shared: ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{intercept("100.64.0.0/10", true)}},
+		},
+		"echo reply on a pass decision": {
+			Local: ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{
+				{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionPass, EchoReply: true},
+			}},
+		},
+		"echo reply on a source decision": {
+			Shared: ActionScope{Default: DecisionIntercept, SourceCIDR: []CIDRDecision{intercept("192.0.2.0/24", true)}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := CompileActionPolicy(policy); err == nil {
+				t.Fatal("policy was accepted")
+			}
+		})
 	}
 }
 

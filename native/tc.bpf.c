@@ -62,6 +62,8 @@
 #define SB_TC_FLAG_SHARED_BYPASS_PORT (1U << 21)
 #define SB_TC_FLAG_SHARED_BYPASS_IPV4 (1U << 22)
 #define SB_TC_FLAG_SHARED_BYPASS_IPV6 (1U << 23)
+#define SB_TC_FLAG_FORCE_INTERCEPT_SLOT1_IPV4 (1U << 24)
+#define SB_TC_FLAG_FORCE_INTERCEPT_SLOT1_IPV6 (1U << 25)
 
 #define SB_TC_SOCKET_POLICY_BYPASS 1U
 #define SB_TC_SOCKET_POLICY_INTERCEPT 2U
@@ -95,10 +97,7 @@ struct sb_tc_control {
     __u16 shared_dns_mode;
     __u8 delivery_mac[6];
     __u16 reserved;
-    __u8 force_intercept_ipv4_prefix[4];
-    __u8 force_intercept_ipv4_mask[4];
-    __u8 force_intercept_ipv6_prefix[16];
-    __u8 force_intercept_ipv6_mask[16];
+    struct sb_ebpf_force_intercept_slot force_intercept[SB_EBPF_FORCE_INTERCEPT_SLOTS];
 };
 
 struct sb_tc_uid_key {
@@ -156,15 +155,15 @@ struct sb_tc_assign_value {
     __u32 generation;
 };
 
-_Static_assert(sizeof(struct sb_tc_control) == 72, "sb_tc_control ABI size");
+_Static_assert(sizeof(struct sb_tc_control) == 112, "sb_tc_control ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, delivery_ifindex) == 8,
     "sb_tc_control delivery_ifindex ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, routing_mark) == 12,
     "sb_tc_control routing_mark ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, listener_port) == 16,
     "sb_tc_control listener_port ABI offset");
-_Static_assert(__builtin_offsetof(struct sb_tc_control, force_intercept_ipv6_mask) == 54,
-    "sb_tc_control force_intercept_ipv6_mask ABI offset");
+_Static_assert(__builtin_offsetof(struct sb_tc_control, force_intercept) == 30,
+    "sb_tc_control force_intercept ABI offset");
 _Static_assert(sizeof(struct sb_tc_assign_key) == 44, "sb_tc_assign_key ABI size");
 _Static_assert(sizeof(struct sb_tc_assign_value) == 32, "sb_tc_assign_value ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, socket_cookie) == 0,
@@ -371,19 +370,19 @@ INLINE bool private_destination(const struct sb_tc_assign_key *key) {
 INLINE bool force_intercept_destination(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key) {
     if (key->family == AF_INET_VALUE) {
-        return sb_ebpf_force_intercept_ipv4(
+        return sb_ebpf_force_intercept_slots_ipv4(
             key->destination_addr,
             control->flags,
             SB_TC_FLAG_FORCE_INTERCEPT_IPV4,
-            control->force_intercept_ipv4_prefix,
-            control->force_intercept_ipv4_mask);
+            SB_TC_FLAG_FORCE_INTERCEPT_SLOT1_IPV4,
+            control->force_intercept);
     }
-    return sb_ebpf_force_intercept_ipv6(
+    return sb_ebpf_force_intercept_slots_ipv6(
         key->destination_addr,
         control->flags,
         SB_TC_FLAG_FORCE_INTERCEPT_IPV6,
-        control->force_intercept_ipv6_prefix,
-        control->force_intercept_ipv6_mask);
+        SB_TC_FLAG_FORCE_INTERCEPT_SLOT1_IPV6,
+        control->force_intercept);
 }
 
 INLINE bool bypass_destination(const struct sb_tc_control *control,

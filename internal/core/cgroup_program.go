@@ -202,8 +202,8 @@ func (b *CgroupBackend) updateCgroupControl(listenerPort uint16) error {
 		HostIPv4:           len(b.hostIPv4) > 0,
 		HostIPv6:           b.enableIPv6 && len(b.hostIPv6) > 0,
 		LocalBypassPort:    b.runtime.bypass_port_policy,
-		ForceInterceptIPv4: b.forceInterceptIPv4.IsValid(),
-		ForceInterceptIPv6: b.forceInterceptIPv6.IsValid(),
+		ForceInterceptIPv4: b.forceIntercept.enabledIPv4(),
+		ForceInterceptIPv6: b.forceIntercept.enabledIPv6(),
 	}.cgroupFlags()
 	if b.runtime.udp_release_observer {
 		flags |= cgroupFlagUDPReleaseNotify
@@ -217,18 +217,11 @@ func (b *CgroupBackend) updateCgroupControl(listenerPort uint16) error {
 		RedirectIPv4Prefix:   ipv4Prefix,
 		RedirectIPv4HostMask: ipv4HostMask,
 		ListenerPort:         listenerPort,
+		ForceIntercept:       b.forceIntercept.controlSlots(),
 	}
 	if b.redirectIPv6.IsValid() {
 		address := b.redirectIPv6.Addr().As16()
 		copy(control.RedirectIPv6Prefix[:], address[:8])
-	}
-	if b.forceInterceptIPv4.IsValid() {
-		control.ForceInterceptIPv4Prefix = b.forceInterceptIPv4.Addr().As4()
-		control.ForceInterceptIPv4Mask = prefixMask4(b.forceInterceptIPv4.Bits())
-	}
-	if b.forceInterceptIPv6.IsValid() {
-		control.ForceInterceptIPv6Prefix = b.forceInterceptIPv6.Addr().As16()
-		control.ForceInterceptIPv6Mask = prefixMask16(b.forceInterceptIPv6.Bits())
 	}
 	key := uint32(0)
 	return updateMap(b.runtime.control_map_fd, unsafe.Pointer(&key), unsafe.Pointer(&control))

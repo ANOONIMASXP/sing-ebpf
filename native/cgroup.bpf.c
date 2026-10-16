@@ -580,12 +580,12 @@ INLINE int handle_v4(
     __u8 destination_bytes[4];
     __builtin_memcpy(destination_bytes, &destination, sizeof(destination_bytes));
     if (sb_ebpf_ipv4_safety_bypass(destination_bytes)) return 1;
-    bool force_intercept = sb_ebpf_force_intercept_ipv4(
+    bool force_intercept = sb_ebpf_force_intercept_slots_ipv4(
         destination_bytes,
         config->flags,
         SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV4,
-        config->force_intercept_ipv4_prefix,
-        config->force_intercept_ipv4_mask);
+        SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_SLOT1_IPV4,
+        config->force_intercept);
     bool force_dns = port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_HIJACK;
     bool intercept_dns = port == 53U && config->dns_mode != SB_EBPF_DNS_MODE_OFF;
     if (!force_intercept && port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_OFF) return 1;
@@ -678,12 +678,12 @@ INLINE int handle_v6(
         __u8 destination_bytes[4];
         __builtin_memcpy(destination_bytes, &destination, sizeof(destination_bytes));
         if (sb_ebpf_ipv4_safety_bypass(destination_bytes)) return 1;
-        bool force_intercept = sb_ebpf_force_intercept_ipv4(
+        bool force_intercept = sb_ebpf_force_intercept_slots_ipv4(
             destination_bytes,
             config->flags,
             SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV4,
-            config->force_intercept_ipv4_prefix,
-            config->force_intercept_ipv4_mask);
+            SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_SLOT1_IPV4,
+            config->force_intercept);
         bool force_dns = port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_HIJACK;
         bool intercept_dns = port == 53U && config->dns_mode != SB_EBPF_DNS_MODE_OFF;
         if (!force_intercept && port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_OFF) return 1;
@@ -739,12 +739,12 @@ INLINE int handle_v6(
     if (sb_ebpf_ipv6_safety_bypass((const __u8 *)address)) return 1;
     // Another backend sharing this socket's cgroup hooks already redirected it.
     if (sb_ebpf_ipv6_redirect_token((const __u8 *)address)) return 1;
-    bool force_intercept = sb_ebpf_force_intercept_ipv6(
+    bool force_intercept = sb_ebpf_force_intercept_slots_ipv6(
         (const __u8 *)address,
         config->flags,
         SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV6,
-        config->force_intercept_ipv6_prefix,
-        config->force_intercept_ipv6_mask);
+        SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_SLOT1_IPV6,
+        config->force_intercept);
     bool force_dns = port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_HIJACK;
     bool intercept_dns = port == 53U && config->dns_mode != SB_EBPF_DNS_MODE_OFF;
     if (!force_intercept && port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_OFF) return 1;

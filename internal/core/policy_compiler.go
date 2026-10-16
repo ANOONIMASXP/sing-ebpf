@@ -9,17 +9,16 @@ import (
 )
 
 // CompiledPolicy is an immutable policy snapshot shared by all eBPF data
-// planes created for one consumer. ForceInterceptIPv4 and ForceInterceptIPv6
-// are opaque application-supplied destination prefixes: the library neither
-// assigns their meaning nor resolves addresses within them.
+// planes created for one consumer. The force-intercept prefixes are opaque
+// application-supplied destination prefixes: the library neither assigns
+// their meaning nor resolves addresses within them.
 type CompiledPolicy struct {
 	uidEntries              []uidLPMKey
 	uidDefaultBypass        bool
 	localDNSMode            DNSMode
 	sharedDNSMode           DNSMode
 	sharedBypassPrivate     bool
-	forceInterceptIPv4      netip.Prefix
-	forceInterceptIPv6      netip.Prefix
+	forceIntercept          forceInterceptPolicy
 	includeSource           dualStackCIDRPrefixes
 	excludeSource           dualStackCIDRPrefixes
 	includeSourceMAC        []MACAddress
@@ -42,27 +41,18 @@ func CompileActionPolicy(config ActionPolicy) (CompiledPolicy, error) {
 	if err := validateActionScope(config.Shared, "shared"); err != nil {
 		return CompiledPolicy{}, err
 	}
-	local, localBypass, localForceIPv4, localForceIPv6, err := compileActionScope(config.Local, "local")
+	var force forceInterceptBuilder
+	local, localBypass, err := compileActionScope(config.Local, "local", &force)
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
-	shared, sharedBypass, sharedForceIPv4, sharedForceIPv6, err := compileActionScope(config.Shared, "shared")
+	shared, sharedBypass, err := compileActionScope(config.Shared, "shared", &force)
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
-	if localForceIPv4.IsValid() && sharedForceIPv4.IsValid() && localForceIPv4 != sharedForceIPv4 {
-		return CompiledPolicy{}, E.New("local and shared IPv4 intercept prefixes differ")
-	}
-	if localForceIPv6.IsValid() && sharedForceIPv6.IsValid() && localForceIPv6 != sharedForceIPv6 {
-		return CompiledPolicy{}, E.New("local and shared IPv6 intercept prefixes differ")
-	}
-	forceIPv4 := localForceIPv4
-	if !forceIPv4.IsValid() {
-		forceIPv4 = sharedForceIPv4
-	}
-	forceIPv6 := localForceIPv6
-	if !forceIPv6.IsValid() {
-		forceIPv6 = sharedForceIPv6
+	forceIntercept, err := force.build()
+	if err != nil {
+		return CompiledPolicy{}, err
 	}
 	return CompiledPolicy{
 		uidEntries:              local.uidEntries,
@@ -74,8 +64,7 @@ func CompileActionPolicy(config ActionPolicy) (CompiledPolicy, error) {
 		excludeSourceMAC:        shared.excludeSourceMAC,
 		localBypassPortEntries:  local.localBypassPortEntries,
 		sharedBypassPortEntries: shared.sharedBypassPortEntries,
-		forceInterceptIPv4:      forceIPv4,
-		forceInterceptIPv6:      forceIPv6,
+		forceIntercept:          forceIntercept,
 		localInitialBypass:      localBypass,
 		sharedInitialBypass:     sharedBypass,
 		sharedDNSMode:           actionDNSMode(config.Shared),
@@ -118,12 +107,12 @@ func validateActionScope(scope ActionScope, name string) error {
 		}
 	}
 	for _, rule := range scope.SourceCIDR {
-		if !rule.Prefix.IsValid() || !rule.Action.Valid() {
+		if !rule.Prefix.IsValid() || !rule.Action.Valid() || rule.EchoReply {
 			return E.New("invalid ", name, " source CIDR decision")
 		}
 	}
 	for _, rule := range scope.DestinationCIDR {
-		if !rule.Prefix.IsValid() || !rule.Action.Valid() {
+		if !rule.Prefix.IsValid() || !rule.Action.Valid() || rule.EchoReply && rule.Action != DecisionIntercept {
 			return E.New("invalid ", name, " destination CIDR decision")
 		}
 	}
@@ -140,14 +129,13 @@ func validateActionScope(scope ActionScope, name string) error {
 	return nil
 }
 
-func compileActionScope(scope ActionScope, name string) (compiledActionScope, dualStackCIDRPrefixes, netip.Prefix, netip.Prefix, error) {
+func compileActionScope(scope ActionScope, name string, force *forceInterceptBuilder) (compiledActionScope, dualStackCIDRPrefixes, error) {
 	result := compiledActionScope{}
 	var err error
 	var bypass dualStackCIDRPrefixes
-	var forceIPv4, forceIPv6 netip.Prefix
 	result.uidEntries, result.uidDefaultBypass, err = compileUIDActionPolicy(scope.UID, scope.Default)
 	if err != nil {
-		return compiledActionScope{}, dualStackCIDRPrefixes{}, netip.Prefix{}, netip.Prefix{}, E.Cause(err, name, " UID policy")
+		return compiledActionScope{}, dualStackCIDRPrefixes{}, E.Cause(err, name, " UID policy")
 	}
 	var sourceInclude, sourceExclude []netip.Prefix
 	for _, rule := range scope.SourceCIDR {
@@ -159,11 +147,11 @@ func compileActionScope(scope ActionScope, name string) (compiledActionScope, du
 	}
 	result.includeSource.ipv4, result.includeSource.ipv6, err = compileCIDRPrefixes(sourceInclude)
 	if err != nil {
-		return compiledActionScope{}, dualStackCIDRPrefixes{}, netip.Prefix{}, netip.Prefix{}, E.Cause(err, name, " include source CIDR policy")
+		return compiledActionScope{}, dualStackCIDRPrefixes{}, E.Cause(err, name, " include source CIDR policy")
 	}
 	result.excludeSource.ipv4, result.excludeSource.ipv6, err = compileCIDRPrefixes(sourceExclude)
 	if err != nil {
-		return compiledActionScope{}, dualStackCIDRPrefixes{}, netip.Prefix{}, netip.Prefix{}, E.Cause(err, name, " exclude source CIDR policy")
+		return compiledActionScope{}, dualStackCIDRPrefixes{}, E.Cause(err, name, " exclude source CIDR policy")
 	}
 	for _, rule := range scope.SourceMAC {
 		if rule.Action == DecisionPass {
@@ -182,16 +170,8 @@ func compileActionScope(scope ActionScope, name string) (compiledActionScope, du
 			}
 			continue
 		}
-		if prefix.Addr().Is4() {
-			if forceIPv4.IsValid() && forceIPv4 != prefix {
-				return compiledActionScope{}, dualStackCIDRPrefixes{}, netip.Prefix{}, netip.Prefix{}, E.New(name, " has multiple IPv4 intercept prefixes")
-			}
-			forceIPv4 = prefix
-		} else {
-			if forceIPv6.IsValid() && forceIPv6 != prefix {
-				return compiledActionScope{}, dualStackCIDRPrefixes{}, netip.Prefix{}, netip.Prefix{}, E.New(name, " has multiple IPv6 intercept prefixes")
-			}
-			forceIPv6 = prefix
+		if err = force.add(rule); err != nil {
+			return compiledActionScope{}, dualStackCIDRPrefixes{}, E.Cause(err, name, " destination CIDR policy")
 		}
 	}
 	for _, rule := range scope.DestinationPort {
@@ -201,7 +181,7 @@ func compileActionScope(scope ActionScope, name string) (compiledActionScope, du
 			// makes ordinary traffic default to pass, so include_package can be
 			// combined with dns_mode=hijack without silently degrading hijack.
 			if scope.Default == DecisionPass && !isDNSHijackPort(rule) {
-				return compiledActionScope{}, dualStackCIDRPrefixes{}, netip.Prefix{}, netip.Prefix{}, E.New(name, " cannot override a pass default with port intercept")
+				return compiledActionScope{}, dualStackCIDRPrefixes{}, E.New(name, " cannot override a pass default with port intercept")
 			}
 			continue
 		}
@@ -212,7 +192,7 @@ func compileActionScope(scope ActionScope, name string) (compiledActionScope, du
 			result.localBypassPortEntries = append(result.localBypassPortEntries, entry)
 		}
 	}
-	return result, bypass, forceIPv4, forceIPv6, nil
+	return result, bypass, nil
 }
 
 func isDNSHijackPort(rule PortDecision) bool {

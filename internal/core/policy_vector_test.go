@@ -26,8 +26,8 @@ func TestPolicyVectorEncodesEachDataPlane(t *testing.T) {
 		IncludeSourceMAC:    true,
 		ExcludeSourceMAC:    true,
 		BypassFlowCache:     true,
-		ForceInterceptIPv4:  true,
-		ForceInterceptIPv6:  true,
+		ForceInterceptIPv4:  [forceInterceptSlots]bool{true, true},
+		ForceInterceptIPv6:  [forceInterceptSlots]bool{true, true},
 	}
 
 	tc := vector.tcFlags()
@@ -36,6 +36,7 @@ func TestPolicyVectorEncodesEachDataPlane(t *testing.T) {
 		tcFlagLocalBypassPort, tcFlagSharedBypassPort,
 		1 << 4, 1 << 5, 1 << 6, 1 << 7, 1 << 8, 1 << 9, 1 << 10, 1 << 11,
 		1 << 12, 1 << 13, 1 << 14, 1 << 15, 1 << 16, 1 << 17,
+		tcFlagForceInterceptSlot1IPv4, tcFlagForceInterceptSlot1IPv6,
 	} {
 		if tc&bit == 0 {
 			t.Fatalf("TC vector omitted flag %#x: %#x", bit, tc)
@@ -49,6 +50,7 @@ func TestPolicyVectorEncodesEachDataPlane(t *testing.T) {
 		cgroupFlagBypassIPv6, cgroupFlagBypassPrivateAddress, cgroupFlagHostIPv4,
 		cgroupFlagHostIPv6, cgroupFlagForceInterceptIPv4, cgroupFlagForceInterceptIPv6,
 		cgroupFlagBypassPort, cgroupFlagUDPFlow,
+		cgroupFlagForceInterceptSlot1IPv4, cgroupFlagForceInterceptSlot1IPv6,
 	} {
 		if cgroup&bit == 0 {
 			t.Fatalf("cgroup vector omitted flag %#x: %#x", bit, cgroup)
@@ -64,6 +66,7 @@ func TestPolicyVectorEncodesEachDataPlane(t *testing.T) {
 		sharedPacketRewriteFlagIncludeSourceMAC, sharedPacketRewriteFlagExcludeSourceMAC,
 		sharedPacketRewriteFlagBypassPrivateAddress, sharedPacketRewriteFlagBypassFlowCache,
 		sharedPacketRewriteFlagForceInterceptIPv4, sharedPacketRewriteFlagForceInterceptIPv6,
+		sharedPacketRewriteFlagForceInterceptSlot1IPv4, sharedPacketRewriteFlagForceInterceptSlot1IPv6,
 	} {
 		if shared&bit == 0 {
 			t.Fatalf("shared vector omitted flag %#x: %#x", bit, shared)

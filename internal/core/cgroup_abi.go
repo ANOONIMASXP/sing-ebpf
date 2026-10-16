@@ -54,21 +54,20 @@ const (
 	cgroupFlagForceInterceptIPv6
 	cgroupFlagBypassPort
 	cgroupFlagUDPReleaseNotify
+	cgroupFlagForceInterceptSlot1IPv4
+	cgroupFlagForceInterceptSlot1IPv6
 )
 
 type cgroupControl struct {
-	Flags                    uint32
-	NetworkGeneration        uint32
-	UDPTimeoutSeconds        uint32
-	RedirectIPv4Prefix       uint32
-	RedirectIPv4HostMask     uint32
-	ListenerPort             uint16
-	DNSMode                  DNSMode
-	RedirectIPv6Prefix       [8]byte
-	ForceInterceptIPv4Prefix [4]byte
-	ForceInterceptIPv4Mask   [4]byte
-	ForceInterceptIPv6Prefix [16]byte
-	ForceInterceptIPv6Mask   [16]byte
+	Flags                uint32
+	NetworkGeneration    uint32
+	UDPTimeoutSeconds    uint32
+	RedirectIPv4Prefix   uint32
+	RedirectIPv4HostMask uint32
+	ListenerPort         uint16
+	DNSMode              DNSMode
+	RedirectIPv6Prefix   [8]byte
+	ForceIntercept       [forceInterceptSlots]forceInterceptSlot
 }
 
 type udpPeerKey struct {

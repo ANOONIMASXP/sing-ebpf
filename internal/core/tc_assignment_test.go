@@ -183,8 +183,10 @@ func TestSweepAssignmentsRemovesOnlyUnchangedStaleEntries(t *testing.T) {
 	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err != nil {
 		t.Fatal(err)
 	}
+	// The oldest nonzero timestamp: subtracting a fixed age from the monotonic
+	// clock would wrap within that age of boot, as in a freshly started test VM.
 	value := expected
-	value.LastSeenNS = monotonicNowNS() - uint64(time.Minute)
+	value.LastSeenNS = 1
 	if err = updateMap(backend.assignmentMapFD, unsafe.Pointer(&key), unsafe.Pointer(&value)); err != nil {
 		t.Fatal(err)
 	}

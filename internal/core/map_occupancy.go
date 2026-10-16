@@ -16,6 +16,7 @@ import (
 type MapOccupancy struct {
 	ID         CiliumEBPF.MapID `json:"id"`
 	Name       string           `json:"name"`
+	Category   MapCategory      `json:"category"`
 	Type       string           `json:"type"`
 	MaxEntries uint32           `json:"max_entries"`
 	KeySize    uint32           `json:"key_size"`
@@ -25,6 +26,51 @@ type MapOccupancy struct {
 	Pressure   string           `json:"pressure"`
 	Supported  bool             `json:"supported"`
 	Error      string           `json:"error,omitempty"`
+}
+
+// MapCategory identifies the semantic role used when interpreting map
+// occupancy diagnostics.
+type MapCategory string
+
+const (
+	// MapCategoryRuntime identifies maps that hold live runtime state.
+	MapCategoryRuntime MapCategory = "runtime"
+	// MapCategoryConfiguredPolicy identifies maps whose capacity is derived
+	// from the currently compiled policy.
+	MapCategoryConfiguredPolicy MapCategory = "configured_policy"
+)
+
+// mapMetadata is the library-owned semantic metadata for a kernel map. The
+// kernel exposes only its name and layout through map info; keeping the
+// classification here prevents consumers from duplicating sing-ebpf's map
+// naming scheme.
+type mapMetadata struct {
+	category MapCategory
+}
+
+var configuredPolicyMapMetadata = map[string]mapMetadata{
+	"sb_cg_bypass_port": {category: MapCategoryConfiguredPolicy},
+	"sb_cg_uid":         {category: MapCategoryConfiguredPolicy},
+	"sb_proc_uid":       {category: MapCategoryConfiguredPolicy},
+	"sb_tc_uid":         {category: MapCategoryConfiguredPolicy},
+	"sb_tc_insrc4":      {category: MapCategoryConfiguredPolicy},
+	"sb_tc_insrc6":      {category: MapCategoryConfiguredPolicy},
+	"sb_tc_exsrc4":      {category: MapCategoryConfiguredPolicy},
+	"sb_tc_exsrc6":      {category: MapCategoryConfiguredPolicy},
+	"sb_tc_insmac":      {category: MapCategoryConfiguredPolicy},
+	"sb_tc_exsmac":      {category: MapCategoryConfiguredPolicy},
+	"sb_tc_lport":       {category: MapCategoryConfiguredPolicy},
+	"sb_tc_sport":       {category: MapCategoryConfiguredPolicy},
+	"sb_sh_inmac":       {category: MapCategoryConfiguredPolicy},
+	"sb_sh_exmac":       {category: MapCategoryConfiguredPolicy},
+	"sb_sh_port":        {category: MapCategoryConfiguredPolicy},
+}
+
+func metadataForMapName(name string) mapMetadata {
+	if metadata, ok := configuredPolicyMapMetadata[name]; ok {
+		return metadata
+	}
+	return mapMetadata{category: MapCategoryRuntime}
 }
 
 type MapOccupancyReport struct {
@@ -60,7 +106,7 @@ func InspectMapOccupancy() MapOccupancyReport {
 			continue
 		}
 		item := MapOccupancy{
-			ID: id, Name: info.Name, Type: info.Type.String(),
+			ID: id, Name: info.Name, Category: metadataForMapName(info.Name).category, Type: info.Type.String(),
 			MaxEntries: info.MaxEntries, KeySize: info.KeySize,
 			ValueSize: info.ValueSize, Flags: info.Flags,
 		}
@@ -76,7 +122,7 @@ func InspectMapOccupancy() MapOccupancyReport {
 		if err != nil {
 			item.Error = err.Error()
 		}
-		item.Pressure = mapPressure(item.Entries, item.MaxEntries, item.Error != "")
+		item.Pressure = mapPressure(item.Category, item.Entries, item.MaxEntries, item.Error != "")
 		report.Maps = append(report.Maps, item)
 		_ = m.Close()
 	}
@@ -90,7 +136,7 @@ func InspectMapOccupancy() MapOccupancyReport {
 func mapOccupancyStatus(maps []MapOccupancy) string {
 	status := "pass"
 	for _, item := range maps {
-		if item.Pressure == "degraded" {
+		if item.Pressure == "degraded" || item.Pressure == "recovery_failed" {
 			return "degraded"
 		} else if item.Pressure == "warning" {
 			status = "warning"
@@ -99,9 +145,12 @@ func mapOccupancyStatus(maps []MapOccupancy) string {
 	return status
 }
 
-func mapPressure(entries, maxEntries uint32, failed bool) string {
+func mapPressure(category MapCategory, entries, maxEntries uint32, failed bool) string {
 	if failed {
 		return "recovery_failed"
+	}
+	if category == MapCategoryConfiguredPolicy {
+		return "configured"
 	}
 	if maxEntries == 0 {
 		return "unknown"

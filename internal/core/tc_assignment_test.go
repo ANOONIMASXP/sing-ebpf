@@ -5,6 +5,7 @@ package core
 import (
 	"net/netip"
 	"testing"
+	"time"
 	"unsafe"
 
 	CiliumEBPF "github.com/cilium/ebpf"
@@ -165,5 +166,37 @@ func TestRemoveAssignmentIfMatch(t *testing.T) {
 	}
 	if _, err := backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err == nil {
 		t.Fatal("matching removal left assignment in map")
+	}
+}
+
+func TestSweepAssignmentsRemovesOnlyUnchangedStaleEntries(t *testing.T) {
+	backend := newTestAssignmentBackend(t)
+	backend.assignmentCapacity = 64
+	source := netip.MustParseAddrPort("192.0.2.10:53000")
+	destination := netip.MustParseAddrPort("1.1.1.1:53")
+	key, err := makeTCAssignKey(ProtocolUDP, source, destination, 17)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := TCAssignment{SocketCookie: 0x4444, InterfaceIndex: 17, Path: TCPathShared}
+	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 17, expected)
+	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err != nil {
+		t.Fatal(err)
+	}
+	value := expected
+	value.LastSeenNS = monotonicNowNS() - uint64(time.Minute)
+	if err = updateMap(backend.assignmentMapFD, unsafe.Pointer(&key), unsafe.Pointer(&value)); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := backend.SweepAssignments(time.Second, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 1 || !result.Complete || !result.UsageKnown || result.Failure != "" {
+		t.Fatalf("unexpected sweep result: %+v", result)
+	}
+	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err == nil {
+		t.Fatal("stale assignment remains in map")
 	}
 }

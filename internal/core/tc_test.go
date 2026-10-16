@@ -27,13 +27,16 @@ func TestTCABI(t *testing.T) {
 	if size := unsafe.Sizeof(tcAssignKey{}); size != 44 {
 		t.Fatalf("unexpected TC assignment key size: %d", size)
 	}
-	if size := unsafe.Sizeof(TCAssignment{}); size != 24 {
+	if size := unsafe.Sizeof(TCAssignment{}); size != 32 {
 		t.Fatalf("unexpected TC assignment value size: %d", size)
 	}
 	if offset := unsafe.Offsetof(TCAssignment{}.SocketCookie); offset != 0 {
 		t.Fatalf("unexpected TC assignment socket cookie offset: %d", offset)
 	}
-	if offset := unsafe.Offsetof(TCAssignment{}.InterfaceIndex); offset != 8 {
+	if offset := unsafe.Offsetof(TCAssignment{}.LastSeenNS); offset != 8 {
+		t.Fatalf("unexpected TC assignment last-seen offset: %d", offset)
+	}
+	if offset := unsafe.Offsetof(TCAssignment{}.InterfaceIndex); offset != 16 {
 		t.Fatalf("unexpected TC assignment interface index offset: %d", offset)
 	}
 }

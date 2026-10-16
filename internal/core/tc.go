@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -26,8 +27,11 @@ const (
 )
 
 const (
-	tcAssignmentCapacity        = 65536
-	CompactTCAssignmentCapacity = 16384
+	// Assignment maps hold active local/shared flow state. Keep enough headroom
+	// for bursts without reserving the oversized legacy Linux default on every
+	// device. Platform-specific compact capacity is selected by sing-box.
+	tcAssignmentCapacity        = 32768
+	CompactTCAssignmentCapacity = 8192
 	tcPortPolicyCapacity        = 4096
 )
 
@@ -145,10 +149,43 @@ type tcAssignKey struct {
 
 type TCAssignment struct {
 	SocketCookie   uint64
+	LastSeenNS     uint64
 	InterfaceIndex uint32
 	SourceMAC      MACAddress
 	Path           uint8
 	SourceMACValid uint8
+	Generation     uint32
+}
+
+// TCAssignmentSweepResult describes one bounded cleanup pass. Entries are
+// removed only when they were observed by userspace, remained unchanged since
+// observation, and exceeded maxIdle. Unobserved kernel entries remain under
+// the LRU safety net because userspace cannot prove their age.
+type TCAssignmentSweepResult struct {
+	Usage    MapUsage
+	Scanned  uint32
+	Removed  uint32
+	Complete bool
+	// UsageKnown is true only after a complete traversal. A bounded partial
+	// traversal must not be interpreted as an empty map by callers.
+	UsageKnown bool
+	Pressure   bool
+	// Failure classifies a failed maintenance pass without requiring callers
+	// to parse platform-specific errno text. An empty value means the pass
+	// completed (or is a normal partial traversal).
+	Failure string
+}
+
+const (
+	TCAssignmentSweepFailureClosed = "closed"
+	TCAssignmentSweepFailureScan   = "scan"
+	TCAssignmentSweepFailureLookup = "lookup"
+	TCAssignmentSweepFailureDelete = "delete"
+)
+
+type tcAssignmentSweepEntry struct {
+	key   tcAssignKey
+	value TCAssignment
 }
 
 type tcRuntime struct {
@@ -157,20 +194,24 @@ type tcRuntime struct {
 }
 
 type TCBackend struct {
-	access           sync.RWMutex
-	health           backendHealth
-	runtime          *tcRuntime
-	tcpListenerMap   bool
-	control          tcControl
-	controlMapFD     int
-	assignmentMapFD  int
-	selfMapExternal  bool
-	bypassIPv4       []netip.Prefix
-	bypassIPv6       []netip.Prefix
-	sharedBypassIPv4 []netip.Prefix
-	sharedBypassIPv6 []netip.Prefix
-	hostIPv4         [][4]byte
-	hostIPv6         [][16]byte
+	access                    sync.RWMutex
+	health                    backendHealth
+	runtime                   *tcRuntime
+	tcpListenerMap            bool
+	control                   tcControl
+	controlMapFD              int
+	assignmentMapFD           int
+	assignmentCapacity        uint32
+	assignmentSweepAccess     sync.Mutex
+	assignmentSweepScratch    mapScanScratch[tcAssignKey, TCAssignment]
+	assignmentSweepCandidates []tcAssignmentSweepEntry
+	selfMapExternal           bool
+	bypassIPv4                []netip.Prefix
+	bypassIPv6                []netip.Prefix
+	sharedBypassIPv4          []netip.Prefix
+	sharedBypassIPv6          []netip.Prefix
+	hostIPv4                  [][4]byte
+	hostIPv6                  [][16]byte
 	// icmpEchoReply is nil unless TCConfig.ICMPEchoReply was set; see
 	// tc_icmp_echo_reply.go. It is a standalone backend (ICMPEchoReplyBackend) rather
 	// than fields inline here because shared.data_plane: packet_rewrite hosts
@@ -304,12 +345,13 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		controlValue.ForceInterceptIPv6Mask = prefixMask16(forceInterceptIPv6.Bits())
 	}
 	backend := &TCBackend{
-		runtime:         &tcRuntime{maps: maps, programs: loadedPrograms},
-		tcpListenerMap:  config.EnableTCP && !legacyTCP,
-		control:         controlValue,
-		controlMapFD:    maps["tc_control"].FD(),
-		assignmentMapFD: maps["tc_assignment"].FD(),
-		selfMapExternal: config.EnableLocal && config.SelfBypassMap != nil,
+		runtime:            &tcRuntime{maps: maps, programs: loadedPrograms},
+		tcpListenerMap:     config.EnableTCP && !legacyTCP,
+		control:            controlValue,
+		controlMapFD:       maps["tc_control"].FD(),
+		assignmentMapFD:    maps["tc_assignment"].FD(),
+		assignmentCapacity: config.AssignmentCapacity,
+		selfMapExternal:    config.EnableLocal && config.SelfBypassMap != nil,
 	}
 	// From here, backend owns maps and loadedPrograms: giving up on either of the
 	// steps below has to close it rather than just returning the step's error, or
@@ -701,6 +743,77 @@ func (b *TCBackend) RemoveAssignmentIfMatch(
 	return true, nil
 }
 
+// SweepAssignments performs a bounded control-plane cleanup pass for TC
+// assignments using the kernel-maintained activity timestamp. The value is
+// rechecked before deletion, preventing an old session from deleting a newer
+// assignment for the same key.
+func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint32) (TCAssignmentSweepResult, error) {
+	if b == nil {
+		return TCAssignmentSweepResult{Failure: TCAssignmentSweepFailureClosed}, errBackendClosed
+	}
+	if maxIdle <= 0 || fallbackBudget == 0 {
+		return TCAssignmentSweepResult{}, unix.EINVAL
+	}
+	b.assignmentSweepAccess.Lock()
+	defer b.assignmentSweepAccess.Unlock()
+	b.access.RLock()
+	defer b.access.RUnlock()
+	if b.runtime == nil || b.runtime.maps["tc_assignment"] == nil {
+		return TCAssignmentSweepResult{Failure: TCAssignmentSweepFailureClosed}, errBackendClosed
+	}
+	result := TCAssignmentSweepResult{Usage: MapUsage{Capacity: b.assignmentCapacity}}
+	now := monotonicNowNS()
+	maxIdleNS := uint64(maxIdle)
+	if now <= maxIdleNS {
+		result.UsageKnown = true
+		return result, nil
+	}
+	staleBefore := now - maxIdleNS
+	b.assignmentSweepCandidates = b.assignmentSweepCandidates[:0]
+	scan, err := b.assignmentSweepScratch.scan(
+		b.runtime.maps["tc_assignment"], b.assignmentCapacity, fallbackBudget,
+		func(key tcAssignKey, value TCAssignment) {
+			if value.LastSeenNS != 0 && value.LastSeenNS <= staleBefore {
+				b.assignmentSweepCandidates = append(b.assignmentSweepCandidates, tcAssignmentSweepEntry{key: key, value: value})
+			}
+		},
+	)
+	if err != nil {
+		result.Failure = TCAssignmentSweepFailureScan
+		return result, err
+	}
+	result.Scanned, result.Complete = scan.Scanned, scan.Complete
+	for _, candidate := range b.assignmentSweepCandidates {
+		var current TCAssignment
+		if err = lookupMap(b.assignmentMapFD, unsafe.Pointer(&candidate.key), unsafe.Pointer(&current)); err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				continue
+			}
+			result.Failure = TCAssignmentSweepFailureLookup
+			return result, err
+		}
+		if current != candidate.value {
+			continue
+		}
+		if err = deleteMap(b.assignmentMapFD, unsafe.Pointer(&candidate.key)); err != nil && !errors.Is(err, unix.ENOENT) {
+			result.Failure = TCAssignmentSweepFailureDelete
+			return result, err
+		}
+		result.Removed++
+	}
+	if result.Complete {
+		result.Usage.Entries = scan.Entries
+		if result.Removed >= result.Usage.Entries {
+			result.Usage.Entries = 0
+		} else {
+			result.Usage.Entries -= result.Removed
+		}
+		result.UsageKnown = true
+		result.Pressure = uint64(result.Usage.Entries)*100 >= uint64(result.Usage.Capacity)*70
+	}
+	return result, nil
+}
+
 // Stats reads the native TC error counters on demand. It performs one map
 // lookup per counter and never runs from a background worker or timer.
 func (b *TCBackend) Stats() (TCStats, error) {
@@ -1040,6 +1153,9 @@ func (b *TCBackend) Close() error {
 	b.runtime = nil
 	b.controlMapFD = -1
 	b.assignmentMapFD = -1
+	b.assignmentCapacity = 0
+	b.assignmentSweepCandidates = nil
+	b.assignmentSweepScratch = mapScanScratch[tcAssignKey, TCAssignment]{}
 	b.selfMapExternal = false
 	b.bypassIPv4 = nil
 	b.bypassIPv6 = nil

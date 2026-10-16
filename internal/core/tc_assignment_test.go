@@ -169,6 +169,44 @@ func TestRemoveAssignmentIfMatch(t *testing.T) {
 	}
 }
 
+// TestRemoveAssignmentIfMatchFollowsActivityRefresh covers a session that read
+// its assignment and closes after more packets: the programs only refreshed
+// LastSeenNS, so the entry is still the session's. Once another session
+// rewrote it under a new Generation, it is left alone.
+func TestRemoveAssignmentIfMatchFollowsActivityRefresh(t *testing.T) {
+	backend := newTestAssignmentBackend(t)
+	source := netip.MustParseAddrPort("192.0.2.10:53000")
+	destination := netip.MustParseAddrPort("1.1.1.1:443")
+	written := TCAssignment{SocketCookie: 0x4444, LastSeenNS: 100, InterfaceIndex: 17, Path: TCPathShared, Generation: 1}
+	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 17, written)
+	expected, err := backend.LookupAssignment(ProtocolUDP, source, destination, 17, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replaced := written
+	replaced.LastSeenNS = 300
+	replaced.Generation = 2
+	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 17, replaced)
+	if removed, err := backend.RemoveAssignmentIfMatch(ProtocolUDP, source, destination, 17, expected); err != nil {
+		t.Fatalf("removal after replacement: %v", err)
+	} else if removed {
+		t.Fatal("a newer generation of the assignment was removed")
+	}
+
+	refreshed := written
+	refreshed.LastSeenNS = 200
+	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 17, refreshed)
+	if removed, err := backend.RemoveAssignmentIfMatch(ProtocolUDP, source, destination, 17, expected); err != nil {
+		t.Fatalf("removal after refresh: %v", err)
+	} else if !removed {
+		t.Fatal("an assignment whose activity was refreshed was not removed")
+	}
+	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err == nil {
+		t.Fatal("refreshed assignment remains in map")
+	}
+}
+
 func TestSweepAssignmentsRemovesOnlyUnchangedStaleEntries(t *testing.T) {
 	backend := newTestAssignmentBackend(t)
 	backend.assignmentCapacity = 64

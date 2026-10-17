@@ -422,6 +422,13 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride, 
 	if err != nil {
 		return nil, nil, err
 	}
+	if !legacyTCP {
+		// Map creation/program verification alone do not prove that the
+		// kernel's TCP protocol implements SOCKMAP listener insertion.
+		if err = probeTCPListenerMap(maps["tc_listener_sockets"], config.EnableLocalIPv6 || config.EnableSharedIPv6); err != nil {
+			return nil, nil, E.Errors(err, closeMaps(maps))
+		}
+	}
 	externalSelfMap := config.EnableLocal && config.SelfBypassMap != nil
 	if externalSelfMap {
 		createdMap := maps["tc_self_sockets"]
@@ -507,6 +514,41 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride, 
 		programs[programIndexes[index]] = program
 	}
 	return maps, programs, nil
+}
+
+func probeTCPListenerMap(socketMap *CiliumEBPF.Map, ipv6 bool) error {
+	families := []int{unix.AF_INET}
+	if ipv6 {
+		families = append(families, unix.AF_INET6)
+	}
+	for _, family := range families {
+		fd, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, unix.IPPROTO_TCP)
+		if err != nil {
+			return err
+		}
+		err = func() error {
+			defer unix.Close(fd)
+			var address unix.Sockaddr = &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}
+			if family == unix.AF_INET6 {
+				address = &unix.SockaddrInet6{Addr: [16]byte{15: 1}}
+			}
+			if err := unix.Bind(fd, address); err != nil {
+				return err
+			}
+			if err := unix.Listen(fd, 1); err != nil {
+				return err
+			}
+			key, value := uint32(0), uint32(fd)
+			if err := socketMap.Update(&key, &value, CiliumEBPF.UpdateAny); err != nil {
+				return E.Cause(err, "probe TCP listener SOCKMAP insertion")
+			}
+			return socketMap.Delete(&key)
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *TCBackend) SetRoutingMark(mark uint32) error {

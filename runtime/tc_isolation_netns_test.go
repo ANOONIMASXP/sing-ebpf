@@ -45,7 +45,7 @@ func TestTCIsolatedRoundTripIntegration(t *testing.T) {
 			}
 			for _, ipv6 := range []bool{false, true} {
 				t.Run(fmt.Sprintf("raw_ip=%v/shared=%v/ipv6=%v", rawIP, shared, ipv6), func(t *testing.T) {
-					testTCIsolatedRoundTrip(t, rawIP, shared, ipv6, false)
+					testTCIsolatedRoundTrip(t, rawIP, shared, ipv6, false, false)
 				})
 			}
 		}
@@ -53,10 +53,18 @@ func TestTCIsolatedRoundTripIntegration(t *testing.T) {
 }
 
 func TestTCIsolatedExistingSNATIntegration(t *testing.T) {
-	testTCIsolatedRoundTrip(t, false, true, false, true)
+	testTCIsolatedRoundTrip(t, false, true, false, true, false)
 }
 
-func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded bool) {
+func TestTCIsolatedListenerPortCollisionIntegration(t *testing.T) {
+	for _, ipv6 := range []bool{false, true} {
+		t.Run(fmt.Sprint(ipv6), func(t *testing.T) {
+			testTCIsolatedRoundTrip(t, false, true, ipv6, false, true)
+		})
+	}
+}
+
+func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded, listenerPortCollision bool) {
 	enterTestNetworkNamespace(t)
 	var host, peer netlink.Link
 	if rawIP {
@@ -146,7 +154,11 @@ func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded bool) {
 			return err
 		}
 		port = tcp.Addr().(*net.TCPAddr).Port
-		udp, err = config.ListenPacket(context.Background(), "udp"+network, fmt.Sprintf(":%d", port))
+		loopback := "127.0.0.1"
+		if ipv6 {
+			loopback = "::1"
+		}
+		udp, err = config.ListenPacket(context.Background(), "udp"+network, net.JoinHostPort(loopback, fmt.Sprint(port)))
 		return err
 	})
 	if err != nil {
@@ -188,6 +200,9 @@ func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded bool) {
 		t.Fatal(err)
 	}
 	endpoint := net.JoinHostPort(remote, "9681")
+	if listenerPortCollision {
+		endpoint = net.JoinHostPort(remote, fmt.Sprint(port))
+	}
 	// Occupy the same remote port in the host namespace. Only isolation
 	// allows a transparent response socket to bind without SO_REUSEPORT.
 	occupied, err := net.ListenPacket("udp"+network, ":9681")

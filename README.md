@@ -114,6 +114,9 @@ use its `Path()` for TCP, UDP and transparent UDP reply sockets, set
 Outbound dialers stay in the host namespace. Close the runtime and sockets
 before closing the caller-owned namespace. No named namespace, mount point,
 holder process, host NAT rule, or host-wide sysctl change is needed.
+Bind isolated UDP listeners to `127.0.0.1` / `::1`; TCP listeners remain wildcard.
+The UDP lookup uses loopback without changing the received packet's tuple,
+avoiding conflicts when a remote UDP endpoint has the listener's own port.
 The low-level non-isolated backend remains available to existing embedders;
 sing-box uses the isolated path for both local TC and shared socket assignment.
 

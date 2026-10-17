@@ -118,6 +118,17 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only) 
     if (!udp_only && flow.protocol == IPPROTO_TCP_VALUE) {
         socket = legacy ? lookup_tcp_socket_legacy(skb, control, &flow) : lookup_tcp_socket(skb, &flow);
     } else {
+        // Lookup the private UDP listener at loopback, not at the original
+        // remote address. This changes only the lookup key, never the packet.
+        // A transparent reply socket can then reuse the listener's port on a
+        // different IP without either bind conflicts or lookup ambiguity.
+        __builtin_memset(flow.destination_addr, 0, 16U);
+        if (flow.family == AF_INET_VALUE) {
+            flow.destination_addr[0] = 127U;
+            flow.destination_addr[3] = 1U;
+        } else {
+            flow.destination_addr[15] = 1U;
+        }
         socket = lookup_udp_socket(skb, control, &flow);
     }
     if (socket == 0) {

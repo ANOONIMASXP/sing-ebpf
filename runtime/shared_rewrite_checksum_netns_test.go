@@ -26,6 +26,14 @@ func TestSharedRewriteUDPChecksumDeliveryIntegration(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			enterTestNetworkNamespace(t)
 			self, peer := createTestVethPair(t, "sbcsum0", "sbcsum1")
+			// This focused fixture attaches only the rewrite filter, not the
+			// runtime's routing/sysctl owner. Isolate it from distro RPF defaults;
+			// otherwise a rewritten loopback source is rejected before UDP input.
+			for _, device := range []string{"all", "sbcsum0"} {
+				if err := os.WriteFile("/proc/sys/net/ipv4/conf/"+device+"/rp_filter", []byte("0"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := os.WriteFile("/proc/sys/net/ipv4/conf/sbcsum0/route_localnet", []byte("1"), 0o644); err != nil {
 				t.Fatal(err)
 			}

@@ -170,7 +170,7 @@ func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded, listener
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend, err := commonEBPF.PrepareTC(commonEBPF.TCConfig{Isolated: true, ListenerPort: uint16(port), EnableLocal: !shared, EnableShared: shared, EnableIPv4: true, EnableLocalIPv6: ipv6 && !shared, EnableSharedIPv6: ipv6 && shared, EnableTCP: true, EnableUDP: true, Policy: policy, AssignmentCapacity: 64})
+	backend, err := commonEBPF.PrepareTC(commonEBPF.TCConfig{ListenerPort: uint16(port), EnableLocal: !shared, EnableShared: shared, EnableIPv4: true, EnableLocalIPv6: ipv6 && !shared, EnableSharedIPv6: ipv6 && shared, EnableTCP: true, EnableUDP: true, Policy: policy, AssignmentCapacity: 64})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded, listener
 		localInterface = ""
 		sharedInterfaces = []string{host.Attrs().Name}
 	}
-	d, err := startTCDataPlane(backend, !shared, ipv6, localInterface, sharedInterfaces, nil, false, 2, n)
+	d, err := startTCDataPlane(backend, ipv6, localInterface, sharedInterfaces, nil, false, 2, n)
 	if d != nil {
 		defer d.Close()
 	}
@@ -416,7 +416,7 @@ func seedIsolatedTestSNAT(t *testing.T, host netlink.Link, client net.Conn, remo
 		t.Fatal(err)
 	}
 	for _, name := range []string{"all", host.Attrs().Name, wan.Attrs().Name} {
-		if _, _, err = setTCInterfaceSysctl(name, "rp_filter", "0"); err != nil {
+		if _, err = setTCSysctl(tcInterfaceSysctlPath(name, "rp_filter"), "0"); err != nil {
 			t.Fatal(err)
 		}
 	}

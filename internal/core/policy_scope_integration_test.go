@@ -33,7 +33,7 @@ func TestScopedPrefixSetsAndPortStagesIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tc, err := PrepareTC(TCConfig{ListenerPort: 65531, EnableShared: true, EnableIPv4: true, EnableTCP: true, Policy: policy})
+	tc, err := PrepareTC(TCConfig{DeliveryInterface: 1, ListenerPort: 65531, EnableShared: true, EnableIPv4: true, EnableTCP: true, Policy: policy})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestScopedPrefixSetsAndPortStagesIntegration(t *testing.T) {
 						if bytes.Equal(packet, output) {
 							t.Fatal("selected packet was not rewritten")
 						}
-					} else if action != testTCActShot {
+					} else if action != testTCActRedirect {
 						t.Fatalf("selected packet did not reach assignment: %d", action)
 					}
 				})

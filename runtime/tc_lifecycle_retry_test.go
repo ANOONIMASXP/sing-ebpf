@@ -5,8 +5,6 @@ package runtime
 import (
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
 	"testing"
 
 	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
@@ -189,32 +187,22 @@ func TestTCStartupLookupFailureReturnsFailedLock(t *testing.T) {
 
 func TestTCDataPlaneRetainsFailedInfrastructure(t *testing.T) {
 	routingLock := &tcRetryResource{fail: true}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "rp_filter")
-	// Reading a directory fails regardless of whether tests run as root.
-	if err := os.Mkdir(path, 0700); err != nil {
-		t.Fatal(err)
-	}
-	d := &tcDataPlane{backend: &commonEBPF.TCBackend{}, routing: &tcPolicyRouting{lock: routingLock}, delivery: &tcDeliveryLink{globalSysctls: []tcSysctlState{{path: path, original: "1", applied: "0"}}}}
+	delivery := &tcDeliveryLink{namespace: &TCNamespace{}, filter: &netlink.BpfFilter{}}
+	d := &tcDataPlane{backend: &commonEBPF.TCBackend{}, routing: &tcPolicyRouting{lock: routingLock}, delivery: delivery}
 	if err := d.Close(); err == nil {
 		t.Fatal("expected infrastructure failure")
 	}
-	if d.IsClosed() || d.backend == nil || d.routing == nil || d.delivery == nil {
+	if d.IsClosed() || d.backend == nil || d.routing == nil || d.delivery != delivery {
 		t.Fatal("lost infrastructure owner/backend")
 	}
 	routingLock.fail = false
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("0"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	// Simulate successful removal of the filter retained in the closed namespace.
+	delivery.filter = nil
 	if err := d.Close(); err != nil {
 		t.Fatal(err)
 	}
-	value, err := os.ReadFile(path)
-	if err != nil || string(value) != "1" || !d.IsClosed() {
-		t.Fatal("infrastructure retry did not restore state")
+	if !d.IsClosed() {
+		t.Fatal("infrastructure retry did not finish")
 	}
 }
 

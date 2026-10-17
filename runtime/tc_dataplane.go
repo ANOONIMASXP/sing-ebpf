@@ -101,23 +101,15 @@ type tcInterfaceAttachment struct {
 }
 
 type tcDeliveryLink struct {
-	namespace     *TCNamespace
-	returnFilter  *netlink.BpfFilter
-	enableIPv6    bool
-	replyMTU      int
-	redirectName  string
-	deliveryName  string
-	redirect      netlink.Link
-	delivery      netlink.Link
-	filter        *netlink.BpfFilter
-	sysctls       []tcSysctlState
-	globalSysctls []tcSysctlState
-}
-
-type tcSysctlState struct {
-	path     string
-	original string
-	applied  string
+	namespace    *TCNamespace
+	returnFilter *netlink.BpfFilter
+	enableIPv6   bool
+	replyMTU     int
+	redirectName string
+	deliveryName string
+	redirect     netlink.Link
+	delivery     netlink.Link
+	filter       *netlink.BpfFilter
 }
 
 type tcDataPlane struct {
@@ -204,19 +196,16 @@ func (d *tcDataPlane) attachInterface(
 
 func startTCDataPlane(
 	backend *commonEBPF.TCBackend,
-	localEnabled bool,
 	enableIPv6 bool,
 	localInterface string,
 	sharedInterfaces []string,
 	hostAddresses []netip.Addr,
 	sharedSourceMACPolicy bool,
 	priority uint16,
-	namespaces ...*TCNamespace,
+	namespace *TCNamespace,
 ) (*tcDataPlane, error) {
 	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
-	if len(namespaces) != 0 {
-		dataPlane.namespace = namespaces[0]
-	}
+	dataPlane.namespace = namespace
 	dataPlane.enableIPv6 = enableIPv6
 	cleanup := func(startErr error) (*tcDataPlane, error) {
 		closeErr := dataPlane.Close()
@@ -225,8 +214,8 @@ func startTCDataPlane(
 		}
 		return nil, E.Errors(startErr, closeErr)
 	}
-	if rawTCBackend(backend).Isolated() != (dataPlane.namespace != nil) {
-		return cleanup(E.New("TC backend and runtime namespace isolation must agree"))
+	if namespace == nil {
+		return cleanup(E.New("socket assignment requires a private listener namespace"))
 	}
 	if dataPlane.namespace != nil {
 		var err error
@@ -246,8 +235,8 @@ func startTCDataPlane(
 	if err = backend.SetRoutingMark(dataPlane.routing.mark); err != nil {
 		return cleanup(E.Cause(err, "set TC eBPF routing mark"))
 	}
-	if localEnabled || dataPlane.namespace != nil {
-		delivery, err := dataPlane.createTCDeliveryLink()
+	{
+		delivery, err := dataPlane.createIsolatedTCDeliveryLink()
 		dataPlane.delivery = delivery
 		if err != nil {
 			return cleanup(err)

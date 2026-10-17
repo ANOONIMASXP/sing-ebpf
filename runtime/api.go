@@ -56,7 +56,6 @@ type TCRuntimeConfig struct {
 	// Namespace remains caller-owned and must outlive the runtime and listeners.
 	Namespace             *TCNamespace
 	Backend               *core.TCBackend
-	LocalEnabled          bool
 	IPv6Enabled           bool
 	LocalInterface        string
 	SharedInterfaces      []string
@@ -77,7 +76,6 @@ func NewTCRuntime(config TCRuntimeConfig) (TCRuntime, error) {
 	}
 	return startTCDataPlane(
 		config.Backend,
-		config.LocalEnabled,
 		config.IPv6Enabled,
 		config.LocalInterface,
 		config.SharedInterfaces,

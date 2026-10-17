@@ -232,9 +232,7 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 }
 
 type TCConfig struct {
-	// Isolated preserves TCP/UDP tuples using a private listener namespace.
-	// Pass the same namespace to runtime.NewTCRuntime and all listener factories.
-	Isolated           bool
+	// TCP and UDP preserve their tuples in a required private listener namespace.
 	ListenerPort       uint16
 	EnableLocal        bool
 	EnableShared       bool
@@ -258,7 +256,6 @@ type TCBackend struct {
 
 func PrepareTC(config TCConfig) (*TCBackend, error) {
 	backend, err := core.PrepareTCWithSelfBypass(core.TCConfig{
-		Isolated:           config.Isolated,
 		ListenerPort:       config.ListenerPort,
 		EnableLocal:        config.EnableLocal,
 		EnableShared:       config.EnableShared,

@@ -43,12 +43,18 @@ func deliveryPairLeftBehind(t *testing.T) []string {
 // network namespace.
 func TestCreateTCDeliveryLinkRemovesThePairWhenTheLookupFails(t *testing.T) {
 	enterTestNetworkNamespace(t)
+	n, err := NewTCNamespace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
 	if leftBehind := deliveryPairLeftBehind(t); len(leftBehind) != 0 {
 		t.Fatalf("a fresh namespace already carries delivery links %v", leftBehind)
 	}
 	dataPlane := &tcDataPlane{
-		backend:  &commonEBPF.TCBackend{},
-		priority: defaultTCPriority,
+		backend:   &commonEBPF.TCBackend{},
+		namespace: n,
+		priority:  defaultTCPriority,
 		hooks: &tcDataPlaneHooks{
 			// Not a "not found" error: the pair was just created, so a lookup
 			// failing here is the kernel refusing to answer, not the link
@@ -57,7 +63,7 @@ func TestCreateTCDeliveryLinkRemovesThePairWhenTheLookupFails(t *testing.T) {
 		},
 	}
 
-	delivery, err := dataPlane.createTCDeliveryLink()
+	delivery, err := dataPlane.createIsolatedTCDeliveryLink()
 	if err == nil {
 		t.Fatalf("a failed lookup was reported as success: %+v", delivery)
 	}
@@ -70,21 +76,18 @@ func TestCreateTCDeliveryLinkRemovesThePairWhenTheLookupFails(t *testing.T) {
 }
 
 // TestCreateTCDeliveryLinkRemovesThePairWhenAttachingFails covers the same
-// property later in the same function, where the handles are already held, the
-// sysctls have already been changed, and clsact has already been ensured: an
-// empty backend has no delivery program loaded, so attachTCFilter is what
-// fails, with "TC eBPF program is unavailable".
-//
-// Asserting that exact message, rather than just that err is non-nil, is what
-// pins this test to the filter-attach step. Without it, an earlier step
-// failing instead — the sysctl writes or ensureTCClsact, which this same
-// function also runs before reaching the filter — would still turn the test
-// green while covering none of what the comment above claims.
+// property at return-filter attachment. An empty backend has no return program,
+// so attaching fails before namespace configuration and must still remove veth.
 func TestCreateTCDeliveryLinkRemovesThePairWhenAttachingFails(t *testing.T) {
 	enterTestNetworkNamespace(t)
-	dataPlane := &tcDataPlane{backend: &commonEBPF.TCBackend{}, priority: defaultTCPriority}
+	n, err := NewTCNamespace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+	dataPlane := &tcDataPlane{namespace: n, backend: &commonEBPF.TCBackend{}, priority: defaultTCPriority}
 
-	delivery, err := dataPlane.createTCDeliveryLink()
+	delivery, err := dataPlane.createIsolatedTCDeliveryLink()
 	if err == nil {
 		t.Fatalf("attaching with no program loaded was reported as success: %+v", delivery)
 	}

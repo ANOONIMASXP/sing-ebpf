@@ -75,10 +75,10 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
 		}
 		return owner, err
 	}
-	owner.redirect, err = netlink.LinkByName(hostName)
+	owner.redirect, err = d.linkByName()(hostName)
 	if err != nil {
 		owner.redirect = veth
-		return cleanup(err)
+		return cleanup(E.Cause(err, "find TC eBPF redirect link"))
 	}
 	if err = netlink.LinkSetUp(owner.redirect); err != nil {
 		return cleanup(err)
@@ -155,7 +155,7 @@ func (d *tcDeliveryLink) configureIsolatedPeer(repair bool) (bool, error) {
 		}
 		healthy = false
 		if repair {
-			if _, _, err = setTCSysctl(path, setting.value); err != nil {
+			if _, err = setTCSysctl(path, setting.value); err != nil {
 				return false, err
 			}
 		}

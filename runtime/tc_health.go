@@ -3,12 +3,8 @@
 package runtime
 
 import (
-	"errors"
-	"net"
 	"net/netip"
-	"os"
 	"slices"
-	"strings"
 
 	"github.com/sagernet/netlink"
 )
@@ -121,65 +117,8 @@ func (r *tcPolicyRouting) healthy() (bool, error) {
 }
 
 func (d *tcDeliveryLink) healthy(priority uint16) (bool, error) {
-	if d != nil && d.namespace != nil {
-		return d.healthyIsolated(priority)
-	}
-	if d == nil || d.redirect == nil || d.delivery == nil || d.filter == nil {
+	if d == nil {
 		return false, nil
 	}
-	redirect, err := netlink.LinkByName(d.redirectName)
-	if err != nil {
-		if tcLinkNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	delivery, err := netlink.LinkByName(d.deliveryName)
-	if err != nil {
-		if tcLinkNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if redirect.Attrs().Index != d.redirect.Attrs().Index ||
-		delivery.Attrs().Index != d.delivery.Attrs().Index ||
-		redirect.Attrs().Flags&net.FlagUp == 0 || delivery.Attrs().Flags&net.FlagUp == 0 {
-		return false, nil
-	}
-	attached, err := tcFilterAttached(
-		delivery,
-		netlink.HANDLE_MIN_INGRESS,
-		"sb_tc_deliver",
-		tcDeliveryFilterHandle,
-		priority,
-	)
-	if err != nil || !attached {
-		return false, err
-	}
-	for _, setting := range []struct {
-		name string
-		want string
-	}{
-		{name: "rp_filter", want: "0"},
-		{name: "accept_local", want: "1"},
-	} {
-		value, readErr := os.ReadFile(tcInterfaceSysctlPath(d.deliveryName, setting.name))
-		if readErr != nil {
-			if errors.Is(readErr, os.ErrNotExist) {
-				return false, nil
-			}
-			return false, readErr
-		}
-		if strings.TrimSpace(string(value)) != setting.want {
-			return false, nil
-		}
-	}
-	aggregate, err := os.ReadFile(tcInterfaceSysctlPath("all", "rp_filter"))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
-	if err == nil && strings.TrimSpace(string(aggregate)) != "0" {
-		return false, nil
-	}
-	return true, nil
+	return d.healthyIsolated(priority)
 }

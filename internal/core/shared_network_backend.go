@@ -527,6 +527,8 @@ func (b *SharedPacketRewriteBackend) Close() error {
 	b.flowSweepScratch = mapScanScratch[sharedNetworkOriginalKey, sharedNetworkTokenValue]{}
 	b.flowSweepCandidates = nil
 	b.flowSweepRemoved = 0
+	b.purgeSweepScratch = mapScanScratch[sharedNetworkOriginalKey, sharedNetworkTokenValue]{}
+	b.purgeInterfaceIndex = 0
 	return closeErr
 }
 

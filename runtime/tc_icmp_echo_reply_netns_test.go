@@ -78,9 +78,9 @@ func setupICMPEchoReplyPingVeth(t *testing.T, selfName, peerName, forceIntercept
 	// by the kernel's reckoning; strict reverse-path filtering drops it on
 	// exactly that basis, the same composition (max(conf.all, conf.<dev>))
 	// this whole series' rp_filter fixes exist for. Cleared on both for the
-	// same reason createTCDeliveryLink clears both on the real delivery veth.
+	// same reason the isolated delivery clears both in its private namespace on the real delivery veth.
 	for _, name := range []string{"all", selfName} {
-		if _, _, err = setTCSysctl(tcInterfaceSysctlPath(name, "rp_filter"), "0"); err != nil {
+		if _, err = setTCSysctl(tcInterfaceSysctlPath(name, "rp_filter"), "0"); err != nil {
 			t.Fatalf("clear rp_filter for %s: %v", name, err)
 		}
 	}

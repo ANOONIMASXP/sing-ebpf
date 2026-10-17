@@ -463,9 +463,7 @@ func assertCgroupUDPMapHandoff(t *testing.T, backend *CgroupBackend) {
 	if _, err = backend.TakeOriginal(ProtocolUDP, listener); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = backend.LookupOriginal(ProtocolUDP, listener); !errors.Is(err, unix.ENOENT) {
-		t.Fatalf("UDP redirect remained after take: %v", err)
-	}
+	assertCgroupHandoffCleanup(t, backend, ProtocolUDP, listener)
 }
 
 func assertCgroupTCPMapHandoff(t *testing.T, backend *CgroupBackend) {
@@ -493,8 +491,25 @@ func assertCgroupTCPMapHandoff(t *testing.T, backend *CgroupBackend) {
 	if recovered.Destination != netip.MustParseAddrPort("192.0.2.20:443") {
 		t.Fatalf("unexpected TCP original destination: got %s", recovered.Destination)
 	}
-	if _, err = backend.LookupOriginal(ProtocolTCP, listener); !errors.Is(err, unix.ENOENT) {
-		t.Fatalf("TCP redirect remained after take: %v", err)
+	assertCgroupHandoffCleanup(t, backend, ProtocolTCP, listener)
+}
+
+func assertCgroupHandoffCleanup(t *testing.T, backend *CgroupBackend, protocol uint8, listener netip.AddrPort) {
+	t.Helper()
+	_, err := backend.LookupOriginal(protocol, listener)
+	if backend.lookupAndDeleteMode.Load() == mapLookupAndDeleteUnsupported {
+		// The documented fallback retains the bounded entry. A separate
+		// lookup/delete would race a kernel replacement of the same key.
+		if err != nil {
+			t.Fatalf("non-atomic handoff did not retain its record: %v", err)
+		}
+		if err = backend.DeleteRedirect(protocol, listener); err != nil {
+			t.Fatal(err)
+		}
+		_, err = backend.LookupOriginal(protocol, listener)
+	}
+	if !errors.Is(err, unix.ENOENT) {
+		t.Fatalf("redirect remained after atomic take or explicit cleanup: %v", err)
 	}
 }
 

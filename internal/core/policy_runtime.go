@@ -19,13 +19,12 @@ const (
 	maxSharedSourceMACPolicyEntries  = 1024
 )
 
-func populatePortPolicyMap(mapInstance *CiliumEBPF.Map, entries []tcPortKey) error {
+func populatePortPolicyMap(mapInstance *CiliumEBPF.Map, entries []compiledPortDecision) error {
 	if mapInstance == nil {
 		return errBackendClosed
 	}
-	value := uint8(1)
 	for _, entry := range entries {
-		if err := mapInstance.Update(&entry, &value, CiliumEBPF.UpdateAny); err != nil {
+		if err := mapInstance.Update(&entry.key, &entry.action, CiliumEBPF.UpdateAny); err != nil {
 			return err
 		}
 	}
@@ -52,6 +51,10 @@ func populateUIDPolicyMap(mapInstance *CiliumEBPF.Map, entries []uidLPMKey) erro
 }
 
 type policyMapTargets struct {
+	LocalForceIPv4    *CiliumEBPF.Map
+	LocalForceIPv6    *CiliumEBPF.Map
+	SharedForceIPv4   *CiliumEBPF.Map
+	SharedForceIPv6   *CiliumEBPF.Map
 	Scope             string
 	UID               *CiliumEBPF.Map
 	LocalPort         *CiliumEBPF.Map
@@ -84,7 +87,7 @@ func populateCompiledPolicyMaps(targets policyMapTargets, policy CompiledPolicy)
 	for _, entry := range []struct {
 		name    string
 		mapInst *CiliumEBPF.Map
-		values  []tcPortKey
+		values  []compiledPortDecision
 	}{
 		{name: "local port", mapInst: targets.LocalPort, values: policy.localBypassPortEntries},
 		{name: "shared port", mapInst: targets.SharedPort, values: policy.sharedBypassPortEntries},
@@ -101,6 +104,10 @@ func populateCompiledPolicyMaps(targets policyMapTargets, policy CompiledPolicy)
 		mapInst  *CiliumEBPF.Map
 		prefixes []netip.Prefix
 	}{
+		{name: "local force IPv4", mapInst: targets.LocalForceIPv4, prefixes: policy.localForce.ipv4},
+		{name: "local force IPv6", mapInst: targets.LocalForceIPv6, prefixes: policy.localForce.ipv6},
+		{name: "shared force IPv4", mapInst: targets.SharedForceIPv4, prefixes: policy.sharedForce.ipv4},
+		{name: "shared force IPv6", mapInst: targets.SharedForceIPv6, prefixes: policy.sharedForce.ipv6},
 		{name: "local bypass IPv4", mapInst: targets.LocalBypassIPv4, prefixes: policy.localInitialBypass.ipv4},
 		{name: "local bypass IPv6", mapInst: targets.LocalBypassIPv6, prefixes: policy.localInitialBypass.ipv6},
 		{name: "shared bypass IPv4", mapInst: targets.SharedBypassIPv4, prefixes: policy.sharedInitialBypass.ipv4},
@@ -112,6 +119,9 @@ func populateCompiledPolicyMaps(targets policyMapTargets, policy CompiledPolicy)
 	} {
 		if entry.mapInst == nil || len(entry.prefixes) == 0 {
 			continue
+		}
+		if err := checkLPMTriePolicyCompatibility(scope+" "+entry.name, len(entry.prefixes)); err != nil {
+			return err
 		}
 		if err := replaceCIDRPolicyMap(entry.mapInst, nil, entry.prefixes); err != nil {
 			return E.Cause(err, "populate ", scope, " ", entry.name, " policy")
@@ -133,6 +143,11 @@ func populateCompiledPolicyMaps(targets policyMapTargets, policy CompiledPolicy)
 		}
 	}
 	return nil
+}
+
+func addForceMapOverrides(overrides map[string]mapSpecOverride, objectPrefix, kernelPrefix string, prefixes dualStackCIDRPrefixes) {
+	overrides[objectPrefix+"_force4"] = mapSpecOverride{name: kernelPrefix + "4", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(prefixes.ipv4)), 1), flags: bpfFlagNoPrealloc}
+	overrides[objectPrefix+"_force6"] = mapSpecOverride{name: kernelPrefix + "6", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(prefixes.ipv6)), 1), flags: bpfFlagNoPrealloc}
 }
 
 type dualStackCIDRPrefixes struct {

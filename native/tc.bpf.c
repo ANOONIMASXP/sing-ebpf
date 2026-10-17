@@ -63,9 +63,6 @@
 #define SB_TC_SOCKET_POLICY_BYPASS 1U
 #define SB_TC_SOCKET_POLICY_INTERCEPT 2U
 
-#define SB_TC_DNS_HIJACK 0U
-#define SB_TC_DNS_RESPECT_POLICY 1U
-#define SB_TC_DNS_OFF 2U
 
 #define SB_TC_LISTENER_TCP4 0U
 #define SB_TC_LISTENER_TCP6 1U
@@ -91,14 +88,9 @@ struct sb_tc_control {
     __u32 delivery_ifindex;
     __u32 routing_mark;
     __u16 listener_port;
-    __u16 local_dns_mode;
-    __u16 shared_dns_mode;
+    __u16 reserved_policy[2];
     __u8 delivery_mac[6];
     __u16 reserved;
-    __u8 force_intercept_ipv4_prefix[4];
-    __u8 force_intercept_ipv4_mask[4];
-    __u8 force_intercept_ipv6_prefix[16];
-    __u8 force_intercept_ipv6_mask[16];
 };
 
 struct sb_tc_uid_key {
@@ -156,15 +148,13 @@ struct sb_tc_assign_value {
     __u32 generation;
 };
 
-_Static_assert(sizeof(struct sb_tc_control) == 72, "sb_tc_control ABI size");
+_Static_assert(sizeof(struct sb_tc_control) == 32, "sb_tc_control ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, delivery_ifindex) == 8,
     "sb_tc_control delivery_ifindex ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, routing_mark) == 12,
     "sb_tc_control routing_mark ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, listener_port) == 16,
     "sb_tc_control listener_port ABI offset");
-_Static_assert(__builtin_offsetof(struct sb_tc_control, force_intercept_ipv6_mask) == 54,
-    "sb_tc_control force_intercept_ipv6_mask ABI offset");
 _Static_assert(sizeof(struct sb_tc_assign_key) == 44, "sb_tc_assign_key ABI size");
 _Static_assert(sizeof(struct sb_tc_assign_value) == 32, "sb_tc_assign_value ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, socket_cookie) == 0,
@@ -254,6 +244,9 @@ MAP(tc_include_source_mac, struct sb_tc_mac_key, __u8, BPF_MAP_TYPE_HASH, 1024U)
 MAP(tc_exclude_source_mac, struct sb_tc_mac_key, __u8, BPF_MAP_TYPE_HASH, 1024U);
 MAP(tc_host_ipv4, struct sb_tc_ipv4_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 MAP(tc_host_ipv6, struct sb_tc_ipv6_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
+SB_FORCE_MAPS(tc_local);
+SB_FORCE_MAPS(tc_shared);
+
 MAP(tc_local_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 MAP(tc_shared_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 
@@ -328,6 +321,9 @@ INLINE bool service_port(__u8 protocol, __u16 source, __u16 destination) {
         destination == 67U || destination == 68U || destination == 546U || destination == 547U;
 }
 
+SB_FORCE_LOOKUP(tc_local)
+SB_FORCE_LOOKUP(tc_shared)
+
 INLINE bool uid_bypassed(struct __sk_buff *skb, const struct sb_tc_control *control) {
     if ((control->flags & SB_TC_FLAG_UID_POLICY) == 0U) return false;
     __u32 uid = network_order32(get_socket_uid(skb));
@@ -343,23 +339,13 @@ INLINE __u32 socket_metadata(__u64 socket_cookie) {
     return metadata != 0 ? *metadata : 0U;
 }
 
-INLINE bool port_bypassed(const struct sb_tc_control *control,
+INLINE __u8 port_action(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *flow, bool shared) {
     __u32 flag = shared ? SB_TC_FLAG_SHARED_BYPASS_PORT : SB_TC_FLAG_LOCAL_BYPASS_PORT;
     if ((control->flags & flag) == 0U) return false;
     struct sb_tc_port_key key = {.protocol = flow->protocol, .port = flow->destination_port};
-    if (shared) return map_lookup(&tc_shared_bypass_port, &key) != 0;
-    return map_lookup(&tc_local_bypass_port, &key) != 0;
-}
-
-INLINE bool dns_selected(__u8 protocol, __u16 destination_port, __u16 mode) {
-    if ((protocol != IPPROTO_TCP_VALUE && protocol != IPPROTO_UDP_VALUE) || destination_port != 53U) return false;
-    return mode == SB_TC_DNS_HIJACK;
-}
-
-INLINE bool dns_bypassed(__u8 protocol, __u16 destination_port, __u16 mode) {
-    return (protocol == IPPROTO_TCP_VALUE || protocol == IPPROTO_UDP_VALUE) &&
-        destination_port == 53U && mode == SB_TC_DNS_OFF;
+    __u8 *action = shared ? map_lookup(&tc_shared_bypass_port, &key) : map_lookup(&tc_local_bypass_port, &key);
+    return action != 0 ? *action : 0U;
 }
 
 INLINE bool private_destination(const struct sb_tc_assign_key *key) {
@@ -368,21 +354,13 @@ INLINE bool private_destination(const struct sb_tc_assign_key *key) {
 }
 
 INLINE bool force_intercept_destination(const struct sb_tc_control *control,
-    const struct sb_tc_assign_key *key) {
+    const struct sb_tc_assign_key *key, bool shared) {
     if (key->family == AF_INET_VALUE) {
-        return sb_ebpf_force_intercept_ipv4(
-            key->destination_addr,
-            control->flags,
-            SB_TC_FLAG_FORCE_INTERCEPT_IPV4,
-            control->force_intercept_ipv4_prefix,
-            control->force_intercept_ipv4_mask);
+        if ((control->flags & SB_TC_FLAG_FORCE_INTERCEPT_IPV4) == 0U) return false;
+        return shared ? tc_shared_force_ipv4(key->destination_addr) : tc_local_force_ipv4(key->destination_addr);
     }
-    return sb_ebpf_force_intercept_ipv6(
-        key->destination_addr,
-        control->flags,
-        SB_TC_FLAG_FORCE_INTERCEPT_IPV6,
-        control->force_intercept_ipv6_prefix,
-        control->force_intercept_ipv6_mask);
+    if ((control->flags & SB_TC_FLAG_FORCE_INTERCEPT_IPV6) == 0U) return false;
+    return shared ? tc_shared_force_ipv6(key->destination_addr) : tc_local_force_ipv6(key->destination_addr);
 }
 
 INLINE bool bypass_destination(const struct sb_tc_control *control,
@@ -469,13 +447,13 @@ INLINE bool shared_source_selected(const struct sb_tc_control *control,
 
 INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, __u32 socket_metadata_value) {
-    if (force_intercept_destination(control, key)) return true;
-    if (dns_bypassed(key->protocol, key->destination_port, control->local_dns_mode)) return false;
-    if (dns_selected(key->protocol, key->destination_port, control->local_dns_mode)) return true;
+    if (force_intercept_destination(control, key, false)) return true;
+    __u8 action = port_action(control, key, false);
+    if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return false;
+    if (action == SB_PORT_INTERCEPT) return true;
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_POLICY_BYPASS) != 0U) return false;
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_POLICY_INTERCEPT) == 0U && uid_bypassed(skb, control)) return false;
-    if (key->destination_port == 53U && control->local_dns_mode == SB_TC_DNS_RESPECT_POLICY) return true;
-    if (port_bypassed(control, key, false)) return false;
+    if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_INTERCEPT) return true;
     if (host_destination(control, key)) return false;
     if ((control->flags & SB_TC_FLAG_LOCAL_BYPASS_PRIVATE) != 0U && private_destination(key)) return false;
     return !bypass_destination(control, key, false);
@@ -483,12 +461,12 @@ INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *co
 
 INLINE bool shared_selected(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, const __u8 source_mac[6]) {
-    if (force_intercept_destination(control, key)) return true;
-    if (dns_bypassed(key->protocol, key->destination_port, control->shared_dns_mode)) return false;
-    if (dns_selected(key->protocol, key->destination_port, control->shared_dns_mode)) return true;
+    if (force_intercept_destination(control, key, true)) return true;
+    __u8 action = port_action(control, key, true);
+    if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return false;
+    if (action == SB_PORT_INTERCEPT) return true;
     if (!shared_source_selected(control, key, source_mac)) return false;
-    if (key->destination_port == 53U && control->shared_dns_mode == SB_TC_DNS_RESPECT_POLICY) return true;
-    if (port_bypassed(control, key, true)) return false;
+    if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_INTERCEPT) return true;
     if (host_destination(control, key)) return false;
     if ((control->flags & SB_TC_FLAG_SHARED_BYPASS_PRIVATE) != 0U && private_destination(key)) return false;
     return !bypass_destination(control, key, true);

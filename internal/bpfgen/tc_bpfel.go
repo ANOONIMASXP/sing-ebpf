@@ -30,12 +30,16 @@ const (
 	TCMapTcLocalBypassIpv4                       = "tc_local_bypass_ipv4"
 	TCMapTcLocalBypassIpv6                       = "tc_local_bypass_ipv6"
 	TCMapTcLocalBypassPort                       = "tc_local_bypass_port"
+	TCMapTcLocalForce4                           = "tc_local_force4"
+	TCMapTcLocalForce6                           = "tc_local_force6"
 	TCMapTcReturn                                = "tc_return"
 	TCMapTcReturnFrag                            = "tc_return_frag"
 	TCMapTcSelfSockets                           = "tc_self_sockets"
 	TCMapTcSharedBypassIpv4                      = "tc_shared_bypass_ipv4"
 	TCMapTcSharedBypassIpv6                      = "tc_shared_bypass_ipv6"
 	TCMapTcSharedBypassPort                      = "tc_shared_bypass_port"
+	TCMapTcSharedForce4                          = "tc_shared_force4"
+	TCMapTcSharedForce6                          = "tc_shared_force6"
 	TCMapTcStats                                 = "tc_stats"
 	TCMapTcUidPolicy                             = "tc_uid_policy"
 	TCProgSingEbpfTcDeliveryIngress              = "sing_ebpf_tc_delivery_ingress"
@@ -148,12 +152,16 @@ type TCMapSpecs struct {
 	TcLocalBypassIpv4   *ebpf.MapSpec `ebpf:"tc_local_bypass_ipv4"`
 	TcLocalBypassIpv6   *ebpf.MapSpec `ebpf:"tc_local_bypass_ipv6"`
 	TcLocalBypassPort   *ebpf.MapSpec `ebpf:"tc_local_bypass_port"`
+	TcLocalForce4       *ebpf.MapSpec `ebpf:"tc_local_force4"`
+	TcLocalForce6       *ebpf.MapSpec `ebpf:"tc_local_force6"`
 	TcReturn            *ebpf.MapSpec `ebpf:"tc_return"`
 	TcReturnFrag        *ebpf.MapSpec `ebpf:"tc_return_frag"`
 	TcSelfSockets       *ebpf.MapSpec `ebpf:"tc_self_sockets"`
 	TcSharedBypassIpv4  *ebpf.MapSpec `ebpf:"tc_shared_bypass_ipv4"`
 	TcSharedBypassIpv6  *ebpf.MapSpec `ebpf:"tc_shared_bypass_ipv6"`
 	TcSharedBypassPort  *ebpf.MapSpec `ebpf:"tc_shared_bypass_port"`
+	TcSharedForce4      *ebpf.MapSpec `ebpf:"tc_shared_force4"`
+	TcSharedForce6      *ebpf.MapSpec `ebpf:"tc_shared_force6"`
 	TcStats             *ebpf.MapSpec `ebpf:"tc_stats"`
 	TcUidPolicy         *ebpf.MapSpec `ebpf:"tc_uid_policy"`
 }
@@ -198,12 +206,16 @@ type TCMaps struct {
 	TcLocalBypassIpv4   *ebpf.Map `ebpf:"tc_local_bypass_ipv4"`
 	TcLocalBypassIpv6   *ebpf.Map `ebpf:"tc_local_bypass_ipv6"`
 	TcLocalBypassPort   *ebpf.Map `ebpf:"tc_local_bypass_port"`
+	TcLocalForce4       *ebpf.Map `ebpf:"tc_local_force4"`
+	TcLocalForce6       *ebpf.Map `ebpf:"tc_local_force6"`
 	TcReturn            *ebpf.Map `ebpf:"tc_return"`
 	TcReturnFrag        *ebpf.Map `ebpf:"tc_return_frag"`
 	TcSelfSockets       *ebpf.Map `ebpf:"tc_self_sockets"`
 	TcSharedBypassIpv4  *ebpf.Map `ebpf:"tc_shared_bypass_ipv4"`
 	TcSharedBypassIpv6  *ebpf.Map `ebpf:"tc_shared_bypass_ipv6"`
 	TcSharedBypassPort  *ebpf.Map `ebpf:"tc_shared_bypass_port"`
+	TcSharedForce4      *ebpf.Map `ebpf:"tc_shared_force4"`
+	TcSharedForce6      *ebpf.Map `ebpf:"tc_shared_force6"`
 	TcStats             *ebpf.Map `ebpf:"tc_stats"`
 	TcUidPolicy         *ebpf.Map `ebpf:"tc_uid_policy"`
 }
@@ -224,12 +236,16 @@ func (m *TCMaps) Close() error {
 		m.TcLocalBypassIpv4,
 		m.TcLocalBypassIpv6,
 		m.TcLocalBypassPort,
+		m.TcLocalForce4,
+		m.TcLocalForce6,
 		m.TcReturn,
 		m.TcReturnFrag,
 		m.TcSelfSockets,
 		m.TcSharedBypassIpv4,
 		m.TcSharedBypassIpv6,
 		m.TcSharedBypassPort,
+		m.TcSharedForce4,
+		m.TcSharedForce6,
 		m.TcStats,
 		m.TcUidPolicy,
 	)

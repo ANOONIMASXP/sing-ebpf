@@ -57,7 +57,7 @@ func TestSharedNetworkCloseClearsFlowBookkeeping(t *testing.T) {
 }
 
 func TestSharedNetworkABI(t *testing.T) {
-	if size := unsafe.Sizeof(sharedPacketRewriteControl{}); size != 80 {
+	if size := unsafe.Sizeof(sharedPacketRewriteControl{}); size != 40 {
 		t.Fatalf("unexpected shared-network control size: %d", size)
 	}
 	if size := unsafe.Sizeof(sharedNetworkListenerKey{}); size != 40 {

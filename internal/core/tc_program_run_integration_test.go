@@ -18,6 +18,7 @@ func TestTCProgramRunIntegration(t *testing.T) {
 		EnableTCP: true,
 		Local:     ActionScope{Default: DecisionIntercept},
 		Shared: ActionScope{
+			DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionIntercept, AfterSelectors: true}},
 			Default:         DecisionIntercept,
 			DestinationCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept}},
 			SourceMAC:       []MACDecision{{Address: MACAddress{0x02, 0, 0, 0, 0, 1}, Action: DecisionIntercept}},
@@ -157,7 +158,7 @@ func TestForceInterceptPolicyPrecedenceIntegration(t *testing.T) {
 	})
 
 	t.Run("packet_rewrite", func(t *testing.T) {
-		backend, err := PrepareSharedPacketRewrite(nil, SharedPacketRewriteConfig{
+		backend, err := PrepareSharedPacketRewrite(SharedPacketRewriteConfig{
 			ListenerPort: 65531,
 			EnableTCP:    true,
 			RedirectIPv4: netip.MustParsePrefix("127.128.0.0/9"),
@@ -330,7 +331,7 @@ func TestTCFragmentPolicyIntegration(t *testing.T) {
 
 func TestSharedPacketRewriteFragmentPolicyIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify shared packet-rewrite fragment policy")
-	backend, err := PrepareSharedPacketRewrite(nil, SharedPacketRewriteConfig{
+	backend, err := PrepareSharedPacketRewrite(SharedPacketRewriteConfig{
 		ListenerPort: 65531,
 		EnableTCP:    true,
 		RedirectIPv4: netip.MustParsePrefix("127.128.0.0/9"),

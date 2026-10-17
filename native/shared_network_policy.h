@@ -5,6 +5,7 @@
 #define SING_EBPF_SHARED_NETWORK_POLICY_H
 
 #include "force_intercept_policy.h"
+#include "private_address.h"
 
 INLINE bool selected_protocol(__u8 protocol, const struct sb_shared_control *control) {
     if (protocol == IPPROTO_TCP_VALUE) return (control->flags & SB_SHARED_FLAG_TCP) != 0U;
@@ -69,14 +70,6 @@ INLINE bool source_mac_included(const __u8 source[6], __u32 flags) {
     return map_lookup(&shared_include_source_mac, &key) != 0;
 }
 
-INLINE bool shared_port_bypassed(__u8 protocol, __u16 destination_port) {
-    struct sb_shared_port_key key = {
-        .protocol = protocol,
-        .port = destination_port,
-    };
-    return map_lookup(&shared_bypass_port, &key) != 0;
-}
-
 INLINE bool ipv4_client_selected(
     const __u8 source_mac[6],
     const __u8 source[4],
@@ -101,16 +94,15 @@ INLINE bool ipv6_client_selected(
     return false;
 }
 
-NOINLINE __u8 shared_dns_policy(
-    __u8 protocol,
-    __u16 source_port,
-    __u16 destination_port,
-    const struct sb_shared_control *control) {
-    if (dhcp_packet(protocol, source_port, destination_port)) return SB_SHARED_POLICY_BYPASS;
-    if (destination_port != 53U) return SB_SHARED_POLICY_CONTINUE;
-    if (control->dns_mode == SB_SHARED_DNS_MODE_OFF) return SB_SHARED_POLICY_BYPASS;
-    if (control->dns_mode == SB_SHARED_DNS_MODE_HIJACK) return SB_SHARED_POLICY_PROXY;
-    return SB_SHARED_POLICY_RESPECT_SOURCE;
+INLINE __u8 shared_port_policy(__u8 protocol, __u16 destination_port) {
+    struct sb_shared_port_key key = {.protocol = protocol, .port = destination_port};
+    __u8 *value = map_lookup(&shared_bypass_port, &key);
+    if (value == 0) return SB_SHARED_POLICY_CONTINUE;
+    __u8 action = *value;
+    if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return SB_SHARED_POLICY_BYPASS;
+    if (action == SB_PORT_INTERCEPT) return SB_SHARED_POLICY_PROXY;
+    if (action == (SB_PORT_INTERCEPT | SB_PORT_AFTER_SELECTORS)) return SB_SHARED_POLICY_RESPECT_SOURCE;
+    return SB_SHARED_POLICY_CONTINUE;
 }
 
 NOINLINE __u8 ipv4_policy(
@@ -126,12 +118,6 @@ NOINLINE __u8 ipv4_policy(
     __builtin_memcpy(key.addr, destination, 4U);
     if ((map_policy_flags & SB_SHARED_FLAG_HOST_IPV4) != 0U &&
         map_lookup(&shared_host_ipv4, &key) != 0) return SB_SHARED_POLICY_BYPASS;
-    if (sb_ebpf_force_intercept_ipv4(
-        destination,
-        control->flags,
-        SB_SHARED_FLAG_FORCE_INTERCEPT_IPV4,
-        control->force_intercept_ipv4_prefix,
-        control->force_intercept_ipv4_mask)) return SB_SHARED_POLICY_PROXY;
     if ((control->flags & SB_SHARED_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
         sb_ebpf_ipv4_private_address(destination)) return SB_SHARED_POLICY_BYPASS;
     if (map_policy_flags == 0U) return SB_SHARED_POLICY_PROXY;
@@ -155,12 +141,6 @@ NOINLINE __u8 ipv6_policy(
     if ((map_policy_flags & SB_SHARED_FLAG_HOST_IPV6) != 0U && map_lookup(&shared_host_ipv6, &key) != 0) {
         return SB_SHARED_POLICY_BYPASS;
     }
-    if (sb_ebpf_force_intercept_ipv6(
-        destination,
-        control->flags,
-        SB_SHARED_FLAG_FORCE_INTERCEPT_IPV6,
-        control->force_intercept_ipv6_prefix,
-        control->force_intercept_ipv6_mask)) return SB_SHARED_POLICY_PROXY;
     if ((control->flags & SB_SHARED_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
         sb_ebpf_ipv6_private_address(destination)) return SB_SHARED_POLICY_BYPASS;
     if (map_policy_flags == 0U) return SB_SHARED_POLICY_PROXY;

@@ -105,7 +105,7 @@ func loadCgroupProbeObject(plan kernelProbePlan) (string, error) {
 	if runtime.GOOS == "android" {
 		mapCapacity = CompactCgroupMapCapacity()
 	}
-	if err = prepareCgroupMaps(runtimeState, mapCapacity, 0, 0, selfBypass.Map()); err == nil {
+	if err = prepareCgroupMaps(runtimeState, mapCapacity, 0, 0, selfBypass.Map(), dualStackCIDRPrefixes{}); err == nil {
 		runtimeState.programs, err = backend.loadCgroupObjectPrograms()
 	}
 	detail := "Loaded the generated cgroup programs and their real map specifications without attaching cgroup hooks."
@@ -172,7 +172,7 @@ func loadSharedNetworkProbeObject(plan kernelProbePlan) (string, error) {
 	if plan.enableIPv6 {
 		config.RedirectIPv6 = netip.MustParsePrefix("fd00::/64")
 	}
-	backend, err := PrepareSharedPacketRewrite(nil, config)
+	backend, err := PrepareSharedPacketRewrite(config)
 	if err != nil {
 		return "Loads the generated shared packet-rewrite programs and their real map specifications without attaching a classifier.", err
 	}
@@ -184,8 +184,10 @@ func loadICMPEchoReplyProbeObject(plan kernelProbePlan) (string, error) {
 		true,
 		plan.localTC && plan.enableIPv6,
 		(plan.sharedSocketAssign || plan.sharedPacketRewrite) && plan.enableIPv6,
-		netip.MustParsePrefix("198.18.0.0/15"),
-		netip.MustParsePrefix("fc00::/18"),
+		CompiledPolicy{
+			localForce:  dualStackCIDRPrefixes{ipv4: []netip.Prefix{netip.MustParsePrefix("198.18.0.0/15")}, ipv6: []netip.Prefix{netip.MustParsePrefix("fc00::/18")}},
+			sharedForce: dualStackCIDRPrefixes{ipv4: []netip.Prefix{netip.MustParsePrefix("198.18.0.0/15")}, ipv6: []netip.Prefix{netip.MustParsePrefix("fc00::/18")}},
+		},
 	)
 	if err != nil {
 		return "Loads the generated ForceIntercept ICMP programs without attaching a classifier.", err

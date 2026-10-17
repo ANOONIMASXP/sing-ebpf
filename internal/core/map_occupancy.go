@@ -49,6 +49,18 @@ type mapMetadata struct {
 }
 
 var configuredPolicyMapMetadata = map[string]mapMetadata{
+	"sb_cg_force4":      {category: MapCategoryConfiguredPolicy},
+	"sb_cg_force6":      {category: MapCategoryConfiguredPolicy},
+	"sb_tc_lforce4":     {category: MapCategoryConfiguredPolicy},
+	"sb_tc_lforce6":     {category: MapCategoryConfiguredPolicy},
+	"sb_tc_sforce4":     {category: MapCategoryConfiguredPolicy},
+	"sb_tc_sforce6":     {category: MapCategoryConfiguredPolicy},
+	"sb_sh_force4":      {category: MapCategoryConfiguredPolicy},
+	"sb_sh_force6":      {category: MapCategoryConfiguredPolicy},
+	"sb_icmp_lforce4":   {category: MapCategoryConfiguredPolicy},
+	"sb_icmp_lforce6":   {category: MapCategoryConfiguredPolicy},
+	"sb_icmp_sforce4":   {category: MapCategoryConfiguredPolicy},
+	"sb_icmp_sforce6":   {category: MapCategoryConfiguredPolicy},
 	"sb_cg_bypass_port": {category: MapCategoryConfiguredPolicy},
 	"sb_cg_uid":         {category: MapCategoryConfiguredPolicy},
 	"sb_proc_uid":       {category: MapCategoryConfiguredPolicy},

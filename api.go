@@ -395,8 +395,8 @@ type SharedPacketRewriteBackend struct {
 	core.SharedPacketRewriteBackendHandle
 }
 
-func PrepareSharedPacketRewrite(cgroupBackend *CgroupBackend, config SharedPacketRewriteConfig) (*SharedPacketRewriteBackend, error) {
-	backend, err := core.PrepareSharedPacketRewrite(cgroupBackend, config)
+func PrepareSharedPacketRewrite(config SharedPacketRewriteConfig) (*SharedPacketRewriteBackend, error) {
+	backend, err := core.PrepareSharedPacketRewrite(config)
 	if err != nil {
 		return nil, err
 	}

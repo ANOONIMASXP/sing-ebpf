@@ -32,6 +32,8 @@ enum cgroup_protocol_mode {
         .max_entries = 1U, \
     }
 
+SB_FORCE_MAPS(cgroup);
+
 MAP(cgroup_control, __u32, struct sb_ebpf_cgroup_control, BPF_MAP_TYPE_ARRAY);
 MAP(cgroup_tcp_redirect, struct sb_ebpf_listener_key, struct sb_ebpf_original_dst, BPF_MAP_TYPE_HASH);
 MAP(cgroup_udp_redirect, struct sb_ebpf_listener_key, struct sb_ebpf_original_dst, BPF_MAP_TYPE_HASH);
@@ -65,6 +67,8 @@ static long (*ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags
 #ifdef SB_EBPF_USE_COARSE_TIME
 static __u64 (*ktime_get_coarse_ns)(void) = (void *)BPF_FUNC_ktime_get_coarse_ns;
 #endif
+
+SB_FORCE_LOOKUP(cgroup)
 
 INLINE __u64 flow_time_ns(void) {
 #ifdef SB_EBPF_USE_COARSE_TIME
@@ -112,10 +116,11 @@ INLINE bool service_port(__u8 protocol, __u16 port) {
     return port == 67U || port == 68U || port == 546U || port == 547U;
 }
 
-INLINE bool port_bypassed(const struct sb_ebpf_cgroup_control *config, __u8 protocol, __u16 port) {
+INLINE __u8 port_action(const struct sb_ebpf_cgroup_control *config, __u8 protocol, __u16 port) {
     if ((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_PORT) == 0U) return false;
     struct sb_ebpf_port_key key = {.protocol = protocol, .port = port};
-    return map_lookup(&cgroup_bypass_port, &key) != 0;
+    __u8 *action = map_lookup(&cgroup_bypass_port, &key);
+    return action != 0 ? *action : 0U;
 }
 
 INLINE bool ipv4_mapped(const __u32 address[4]) {
@@ -524,15 +529,11 @@ INLINE int handle_v4(
     __u8 destination_bytes[4];
     __builtin_memcpy(destination_bytes, &destination, sizeof(destination_bytes));
     if (sb_ebpf_ipv4_safety_bypass(destination_bytes)) return 1;
-    bool force_intercept = sb_ebpf_force_intercept_ipv4(
-        destination_bytes,
-        config->flags,
-        SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV4,
-        config->force_intercept_ipv4_prefix,
-        config->force_intercept_ipv4_mask);
-    bool force_dns = port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_HIJACK;
-    bool intercept_dns = port == 53U && config->dns_mode != SB_EBPF_DNS_MODE_OFF;
-    if (!force_intercept && port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_OFF) return 1;
+    bool force_intercept = ((config->flags & SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV4) != 0U && cgroup_force_ipv4(destination_bytes));
+    __u8 action = port_action(config, protocol, port);
+    bool priority_intercept = action == SB_PORT_INTERCEPT;
+    bool selected_intercept = (action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_INTERCEPT;
+    if (!force_intercept && (action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return 1;
     if (connected_udp) {
         reset_connected_udp(cookie);
         store_udp_peer_v4(cookie, destination, port);
@@ -543,15 +544,14 @@ INLINE int handle_v4(
     // Android resolver/netd may reuse a socket identity for requests with
     // different policy owners, and a cached proxy action must not override
     // respect_policy's UID bypass decision.
-    if (!force_intercept && !force_dns && uid_bypassed(config)) return 1;
+    if (!force_intercept && !priority_intercept && uid_bypassed(config)) return 1;
     if (!connect_hook) {
         int cached = flow_action(
             ctx, config, AF_INET_VALUE, protocol, port, flow_address, cookie, false);
         if (cached == FLOW_CACHE_PROXY ||
-            (!force_intercept && !intercept_dns && cached == FLOW_CACHE_BYPASS)) return 1;
+            (!force_intercept && !selected_intercept && cached == FLOW_CACHE_BYPASS)) return 1;
     }
-    if (!force_intercept && !intercept_dns) {
-        if (port_bypassed(config, protocol, port)) return 1;
+    if (!force_intercept && !selected_intercept) {
         if ((config->flags & SB_EBPF_CGROUP_FLAG_HOST_IPV4) != 0U && host_ipv4(destination)) return 1;
         if (((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
                 sb_ebpf_ipv4_private_address(destination_bytes)) ||
@@ -621,15 +621,11 @@ INLINE int handle_v6(
         __u8 destination_bytes[4];
         __builtin_memcpy(destination_bytes, &destination, sizeof(destination_bytes));
         if (sb_ebpf_ipv4_safety_bypass(destination_bytes)) return 1;
-        bool force_intercept = sb_ebpf_force_intercept_ipv4(
-            destination_bytes,
-            config->flags,
-            SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV4,
-            config->force_intercept_ipv4_prefix,
-            config->force_intercept_ipv4_mask);
-        bool force_dns = port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_HIJACK;
-        bool intercept_dns = port == 53U && config->dns_mode != SB_EBPF_DNS_MODE_OFF;
-        if (!force_intercept && port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_OFF) return 1;
+        bool force_intercept = ((config->flags & SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV4) != 0U && cgroup_force_ipv4(destination_bytes));
+        __u8 action = port_action(config, protocol, port);
+        bool priority_intercept = action == SB_PORT_INTERCEPT;
+        bool selected_intercept = (action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_INTERCEPT;
+        if (!force_intercept && (action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return 1;
         if (connected_udp) {
             reset_connected_udp(cookie);
             store_udp_peer_v4(cookie, destination, port);
@@ -638,15 +634,14 @@ INLINE int handle_v6(
         __builtin_memcpy(flow_address, &destination, sizeof(destination));
         // UID policy is per socket operation; do not let a cached UDP proxy
         // decision bypass respect_policy for a different policy owner.
-        if (!force_intercept && !force_dns && uid_bypassed(config)) return 1;
+        if (!force_intercept && !priority_intercept && uid_bypassed(config)) return 1;
         if (!connect_hook) {
             int cached = flow_action(
                 ctx, config, AF_INET_VALUE, protocol, port, flow_address, cookie, true);
             if (cached == FLOW_CACHE_PROXY ||
-                (!force_intercept && !intercept_dns && cached == FLOW_CACHE_BYPASS)) return 1;
+                (!force_intercept && !selected_intercept && cached == FLOW_CACHE_BYPASS)) return 1;
         }
-        if (!force_intercept && !intercept_dns) {
-            if (port_bypassed(config, protocol, port)) return 1;
+        if (!force_intercept && !selected_intercept) {
             if ((config->flags & SB_EBPF_CGROUP_FLAG_HOST_IPV4) != 0U && host_ipv4(destination)) return 1;
             if (((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
                     sb_ebpf_ipv4_private_address(destination_bytes)) ||
@@ -680,15 +675,11 @@ INLINE int handle_v6(
     if (!connect_hook) (void)restore_udp_peer_v6(cookie, address, &port);
     if (service_port(protocol, port)) return 1;
     if (sb_ebpf_ipv6_safety_bypass((const __u8 *)address)) return 1;
-    bool force_intercept = sb_ebpf_force_intercept_ipv6(
-        (const __u8 *)address,
-        config->flags,
-        SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV6,
-        config->force_intercept_ipv6_prefix,
-        config->force_intercept_ipv6_mask);
-    bool force_dns = port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_HIJACK;
-    bool intercept_dns = port == 53U && config->dns_mode != SB_EBPF_DNS_MODE_OFF;
-    if (!force_intercept && port == 53U && config->dns_mode == SB_EBPF_DNS_MODE_OFF) return 1;
+    bool force_intercept = ((config->flags & SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV6) != 0U && cgroup_force_ipv6((const __u8 *)address));
+    __u8 action = port_action(config, protocol, port);
+    bool priority_intercept = action == SB_PORT_INTERCEPT;
+    bool selected_intercept = (action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_INTERCEPT;
+    if (!force_intercept && (action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return 1;
     if (connected_udp) {
         reset_connected_udp(cookie);
         store_udp_peer_v6(cookie, address, port);
@@ -697,15 +688,14 @@ INLINE int handle_v6(
     __builtin_memcpy(flow_address, address, sizeof(flow_address));
     // UID policy is per socket operation; do not let a cached UDP proxy
     // decision bypass respect_policy for a different policy owner.
-    if (!force_intercept && !force_dns && uid_bypassed(config)) return 1;
+    if (!force_intercept && !priority_intercept && uid_bypassed(config)) return 1;
     if (!connect_hook) {
         int cached = flow_action(
             ctx, config, AF_INET6_VALUE, protocol, port, flow_address, cookie, false);
         if (cached == FLOW_CACHE_PROXY ||
-            (!force_intercept && !intercept_dns && cached == FLOW_CACHE_BYPASS)) return 1;
+            (!force_intercept && !selected_intercept && cached == FLOW_CACHE_BYPASS)) return 1;
     }
-    if (!force_intercept && !intercept_dns) {
-        if (port_bypassed(config, protocol, port)) return 1;
+    if (!force_intercept && !selected_intercept) {
         if ((config->flags & SB_EBPF_CGROUP_FLAG_HOST_IPV6) != 0U && host_ipv6(address)) return 1;
         if (((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
                 sb_ebpf_ipv6_private_address((const __u8 *)address)) ||

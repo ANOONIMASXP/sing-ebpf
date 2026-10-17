@@ -18,6 +18,10 @@ import (
 const (
 	ICMPEchoReplyMapIcmpEchoReplyControl                      = "icmp_echo_reply_control"
 	ICMPEchoReplyMapIcmpEchoReplyStats                        = "icmp_echo_reply_stats"
+	ICMPEchoReplyMapIcmpLocalForce4                           = "icmp_local_force4"
+	ICMPEchoReplyMapIcmpLocalForce6                           = "icmp_local_force6"
+	ICMPEchoReplyMapIcmpSharedForce4                          = "icmp_shared_force4"
+	ICMPEchoReplyMapIcmpSharedForce6                          = "icmp_shared_force6"
 	ICMPEchoReplyProgSingEbpfIcmpEchoReplyLocalReplyEthernet  = "sing_ebpf_icmp_echo_reply_local_reply_ethernet"
 	ICMPEchoReplyProgSingEbpfIcmpEchoReplyLocalReplyRawIp     = "sing_ebpf_icmp_echo_reply_local_reply_raw_ip"
 	ICMPEchoReplyProgSingEbpfIcmpEchoReplySharedReplyEthernet = "sing_ebpf_icmp_echo_reply_shared_reply_ethernet"
@@ -78,6 +82,10 @@ type ICMPEchoReplyProgramSpecs struct {
 type ICMPEchoReplyMapSpecs struct {
 	IcmpEchoReplyControl *ebpf.MapSpec `ebpf:"icmp_echo_reply_control"`
 	IcmpEchoReplyStats   *ebpf.MapSpec `ebpf:"icmp_echo_reply_stats"`
+	IcmpLocalForce4      *ebpf.MapSpec `ebpf:"icmp_local_force4"`
+	IcmpLocalForce6      *ebpf.MapSpec `ebpf:"icmp_local_force6"`
+	IcmpSharedForce4     *ebpf.MapSpec `ebpf:"icmp_shared_force4"`
+	IcmpSharedForce6     *ebpf.MapSpec `ebpf:"icmp_shared_force6"`
 }
 
 // ICMPEchoReplyVariableSpecs contains global variables before they are loaded into the kernel.
@@ -108,12 +116,20 @@ func (o *ICMPEchoReplyObjects) Close() error {
 type ICMPEchoReplyMaps struct {
 	IcmpEchoReplyControl *ebpf.Map `ebpf:"icmp_echo_reply_control"`
 	IcmpEchoReplyStats   *ebpf.Map `ebpf:"icmp_echo_reply_stats"`
+	IcmpLocalForce4      *ebpf.Map `ebpf:"icmp_local_force4"`
+	IcmpLocalForce6      *ebpf.Map `ebpf:"icmp_local_force6"`
+	IcmpSharedForce4     *ebpf.Map `ebpf:"icmp_shared_force4"`
+	IcmpSharedForce6     *ebpf.Map `ebpf:"icmp_shared_force6"`
 }
 
 func (m *ICMPEchoReplyMaps) Close() error {
 	return _ICMPEchoReplyClose(
 		m.IcmpEchoReplyControl,
 		m.IcmpEchoReplyStats,
+		m.IcmpLocalForce4,
+		m.IcmpLocalForce6,
+		m.IcmpSharedForce4,
+		m.IcmpSharedForce6,
 	)
 }
 

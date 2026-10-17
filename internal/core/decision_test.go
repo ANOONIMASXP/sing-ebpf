@@ -54,43 +54,49 @@ func TestCompileActionPolicyUsesFinalActions(t *testing.T) {
 	}
 }
 
-func TestCompileActionPolicyDerivesDNSAction(t *testing.T) {
-	for _, testCase := range []struct {
-		name       string
-		action     Decision
-		wantLocal  DNSMode
-		wantShared DNSMode
-	}{
-		{"hijack", DecisionIntercept, DNSModeHijack, DNSModeHijack},
-		{"off", DecisionPass, DNSModeOff, DNSModeOff},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			policy, err := CompileActionPolicy(ActionPolicy{
-				Local: ActionScope{
-					Default:         DecisionIntercept,
-					DestinationPort: []PortDecision{{Protocol: ProtocolUDP, Port: 53, Action: testCase.action}},
-				},
-				Shared: ActionScope{
-					Default:         DecisionIntercept,
-					DestinationPort: []PortDecision{{Protocol: ProtocolUDP, Port: 53, Action: testCase.action}},
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
+func TestCompileActionPolicyPortStages(t *testing.T) {
+	for _, port := range []uint16{53, 443, 5353} {
+		for _, action := range []Decision{DecisionPass, DecisionIntercept} {
+			for _, after := range []bool{false, true} {
+				scope := ActionScope{Default: DecisionPass, DestinationPort: []PortDecision{{Protocol: ProtocolUDP, Port: port, Action: action, AfterSelectors: after}}}
+				policy, err := CompileActionPolicy(ActionPolicy{Local: scope, Shared: scope})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := uint8(action) + 1
+				if after {
+					want |= portActionAfterSelectors
+				}
+				if len(policy.localBypassPortEntries) != 1 || policy.localBypassPortEntries[0].action != want || policy.sharedBypassPortEntries[0].action != want {
+					t.Fatalf("port stage lost: %+v", policy)
+				}
 			}
-			if policy.localDNSMode != testCase.wantLocal || policy.sharedDNSMode != testCase.wantShared {
-				t.Fatalf("DNS modes = %v/%v, want %v/%v", policy.localDNSMode, policy.sharedDNSMode, testCase.wantLocal, testCase.wantShared)
-			}
-		})
+		}
 	}
-	policy, err := CompileActionPolicy(ActionPolicy{
-		Local:  ActionScope{Default: DecisionIntercept},
-		Shared: ActionScope{Default: DecisionIntercept},
-	})
+	policy, err := CompileActionPolicy(ActionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if policy.localDNSMode != DNSModeRespectPolicy || policy.sharedDNSMode != DNSModeRespectPolicy {
-		t.Fatalf("empty DNS action policy = %v/%v, want respect-policy", policy.localDNSMode, policy.sharedDNSMode)
+	if len(policy.localBypassPortEntries)+len(policy.sharedBypassPortEntries) != 0 {
+		t.Fatal("library inferred a port policy")
+	}
+}
+
+func TestCompileActionPolicyIndependentPrefixSets(t *testing.T) {
+	local := []CIDRDecision{
+		{Prefix: netip.MustParsePrefix("100.64.0.0/10"), Action: DecisionIntercept},
+		{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept},
+		{Prefix: netip.MustParsePrefix("fd00::/8"), Action: DecisionIntercept},
+	}
+	shared := []CIDRDecision{{Prefix: netip.MustParsePrefix("10.0.0.0/8"), Action: DecisionIntercept}}
+	policy, err := CompileActionPolicy(ActionPolicy{Local: ActionScope{DestinationCIDR: local}, Shared: ActionScope{DestinationCIDR: shared}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.localForce.ipv4) != 2 || len(policy.localForce.ipv6) != 1 || len(policy.sharedForce.ipv4) != 1 || len(policy.sharedForce.ipv6) != 0 {
+		t.Fatalf("scope leak: %+v", policy)
+	}
+	if policy.sharedForce.ipv4[0] != shared[0].Prefix {
+		t.Fatal("local prefixes leaked into shared")
 	}
 }

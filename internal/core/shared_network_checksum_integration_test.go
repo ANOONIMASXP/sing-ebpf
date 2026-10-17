@@ -25,7 +25,7 @@ func TestSharedPacketRewriteUDPChecksumIntegration(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				backend, err := PrepareSharedPacketRewrite(nil, SharedPacketRewriteConfig{
+				backend, err := PrepareSharedPacketRewrite(SharedPacketRewriteConfig{
 					ListenerPort: 65531, EnableUDP: true, Policy: policy,
 					RedirectIPv4: netip.MustParsePrefix("127.128.0.0/9"),
 					RedirectIPv6: netip.MustParsePrefix("fd53:696e:672d:626f::/64"),

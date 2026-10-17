@@ -77,7 +77,7 @@ func TestSharedRewriteUDPChecksumDeliveryIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			backend, err := commonEBPF.PrepareSharedPacketRewrite(nil, commonEBPF.SharedPacketRewriteConfig{
+			backend, err := commonEBPF.PrepareSharedPacketRewrite(commonEBPF.SharedPacketRewriteConfig{
 				ListenerPort: uint16(bound.(*unix.SockaddrInet4).Port), EnableUDP: true,
 				RedirectIPv4: netip.MustParsePrefix("127.128.0.0/9"), Policy: policy,
 				MapCapacity: commonEBPF.SharedPacketRewriteMapCapacity{Proxy: 64, Bypass: 64}, UDPTimeout: time.Minute,

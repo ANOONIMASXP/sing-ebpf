@@ -17,9 +17,6 @@
 #define SB_EBPF_SOCKET_METADATA_POLICY_BYPASS (1U << 1U)
 #define SB_EBPF_SOCKET_METADATA_POLICY_INTERCEPT (1U << 2U)
 
-#define SB_EBPF_DNS_MODE_HIJACK 0U
-#define SB_EBPF_DNS_MODE_RESPECT_POLICY 1U
-#define SB_EBPF_DNS_MODE_OFF 2U
 
 #define SB_EBPF_CGROUP_FLAG_TCP (1U << 0U)
 #define SB_EBPF_CGROUP_FLAG_UDP (1U << 1U)
@@ -44,15 +41,11 @@ struct sb_ebpf_cgroup_control {
     __u32 redirect_ipv4_prefix;
     __u32 redirect_ipv4_host_mask;
     __u16 listener_port;
-    __u16 dns_mode;
+    __u16 reserved_policy;
     __u8 redirect_ipv6_prefix[8];
-    __u8 force_intercept_ipv4_prefix[4];
-    __u8 force_intercept_ipv4_mask[4];
-    __u8 force_intercept_ipv6_prefix[16];
-    __u8 force_intercept_ipv6_mask[16];
 };
 
-_Static_assert(sizeof(struct sb_ebpf_cgroup_control) == 72U, "unexpected cgroup control ABI");
+_Static_assert(sizeof(struct sb_ebpf_cgroup_control) == 32U, "unexpected cgroup control ABI");
 _Static_assert(__builtin_offsetof(struct sb_ebpf_cgroup_control, network_generation) == 4U,
     "unexpected cgroup network generation ABI");
 

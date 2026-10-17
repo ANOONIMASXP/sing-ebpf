@@ -167,8 +167,8 @@ func TestCompileActionPolicySnapshot(t *testing.T) {
 		len(policy.localBypassPortEntries) != 2 {
 		t.Fatalf("compiled policy omitted configured rules: %+v", policy)
 	}
-	if policy.forceInterceptIPv4 != netip.MustParsePrefix("198.18.0.0/15") {
-		t.Fatalf("ForceIntercept prefix was not normalized: %s", policy.forceInterceptIPv4)
+	if policy.localForce.ipv4[0] != netip.MustParsePrefix("198.18.0.0/15") {
+		t.Fatalf("ForceIntercept prefix was not normalized: %s", policy.localForce.ipv4[0])
 	}
 	includeUID[0].Start = 2000
 	includeSource[0] = netip.MustParsePrefix("203.0.113.0/24")
@@ -196,20 +196,20 @@ func TestCompileActionPolicyAllowsGlobalDNSHijackWithUIDPassDefault(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if policy.localDNSMode != DNSModeHijack || !policy.uidDefaultBypass {
-		t.Fatalf("DNS hijack or UID pass-default was lost: mode=%v default_bypass=%v", policy.localDNSMode, policy.uidDefaultBypass)
+	if len(policy.localBypassPortEntries) != 2 || policy.localBypassPortEntries[0].action != portActionIntercept || !policy.uidDefaultBypass {
+		t.Fatalf("DNS hijack or UID pass-default was lost: mode=%v default_bypass=%v", policy.localBypassPortEntries, policy.uidDefaultBypass)
 	}
 }
 
-func TestCompileActionPolicyStillRejectsNonDNSPortInterceptWithUIDPassDefault(t *testing.T) {
+func TestCompileActionPolicyAllowsGenericPortInterceptWithUIDPassDefault(t *testing.T) {
 	_, err := CompileActionPolicy(ActionPolicy{
 		Local: ActionScope{
 			Default:         DecisionPass,
 			DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 443, Action: DecisionIntercept}},
 		},
 	})
-	if err == nil {
-		t.Fatal("non-DNS port intercept unexpectedly overrode a pass default")
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

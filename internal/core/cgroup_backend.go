@@ -118,11 +118,9 @@ type CgroupBackend struct {
 	cgroupPath              string
 	redirectIPv4            netip.Prefix
 	redirectIPv6            netip.Prefix
-	forceInterceptIPv4      netip.Prefix
-	forceInterceptIPv6      netip.Prefix
 	enableIPv6              bool
 	enableUDP               bool
-	dnsMode                 DNSMode
+	forceIPv4, forceIPv6    bool
 	bypassPrivateAddress    bool
 	udpTimeoutSeconds       uint32
 	networkGeneration       uint32
@@ -136,8 +134,6 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 	mapCapacity := config.MapCapacity
 	policy := config.Policy
 	var err error
-	forceInterceptIPv4 := policy.forceInterceptIPv4
-	forceInterceptIPv6 := policy.forceInterceptIPv6
 	if err := validateCgroupMapCapacity(mapCapacity); err != nil {
 		return nil, err
 	}
@@ -228,7 +224,7 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 		socket_release_supported: socketReleaseSupported,
 		coarse_time_supported:    coarseTimeSupported,
 	}
-	if err = prepareCgroupMaps(runtimeState, mapCapacity, len(uidPolicyEntries), len(policy.localBypassPortEntries), config.SelfBypassMap); err != nil {
+	if err = prepareCgroupMaps(runtimeState, mapCapacity, len(uidPolicyEntries), len(policy.localBypassPortEntries), config.SelfBypassMap, policy.localForce); err != nil {
 		_ = closeMaps(runtimeState.maps)
 		_ = runtimeState.cgroupFile.Close()
 		if memlockErr != nil && (errors.Is(err, unix.ENOMEM) || errors.Is(err, unix.EPERM)) {
@@ -251,17 +247,18 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 		cgroupPath:           cgroupPath,
 		redirectIPv4:         redirectIPv4,
 		redirectIPv6:         redirectIPv6,
-		forceInterceptIPv4:   forceInterceptIPv4,
-		forceInterceptIPv6:   forceInterceptIPv6,
+		forceIPv4:            len(policy.localForce.ipv4) > 0,
+		forceIPv6:            len(policy.localForce.ipv6) > 0,
 		enableIPv6:           config.EnableIPv6,
 		enableUDP:            config.EnableUDP,
-		dnsMode:              policy.localDNSMode,
 		bypassPrivateAddress: false,
 		udpTimeoutSeconds:    udpTimeoutSeconds,
 		bypassIPv4CIDR:       slices.Clone(policy.localInitialBypass.ipv4),
 		bypassIPv6CIDR:       slices.Clone(policy.localInitialBypass.ipv6),
 	}
 	if err = populateCompiledPolicyMaps(policyMapTargets{
+		LocalForceIPv4:  runtimeState.maps["cgroup_force4"],
+		LocalForceIPv6:  runtimeState.maps["cgroup_force6"],
 		Scope:           "cgroup eBPF",
 		UID:             runtimeState.maps["cgroup_uid_policy"],
 		LocalPort:       runtimeState.maps["cgroup_bypass_port"],

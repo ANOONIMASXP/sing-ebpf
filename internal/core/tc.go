@@ -129,19 +129,14 @@ type tcPortKey struct {
 }
 
 type tcControl struct {
-	Enabled                  uint32
-	Flags                    uint32
-	DeliveryInterface        uint32
-	RoutingMark              uint32
-	ListenerPort             uint16
-	LocalDNSMode             DNSMode
-	SharedDNSMode            DNSMode
-	DeliveryMAC              MACAddress
-	Reserved                 uint16
-	ForceInterceptIPv4Prefix [4]byte
-	ForceInterceptIPv4Mask   [4]byte
-	ForceInterceptIPv6Prefix [16]byte
-	ForceInterceptIPv6Mask   [16]byte
+	Enabled           uint32
+	Flags             uint32
+	DeliveryInterface uint32
+	RoutingMark       uint32
+	ListenerPort      uint16
+	ReservedPolicy    [2]uint16
+	DeliveryMAC       MACAddress
+	Reserved          uint16
 }
 
 type tcAssignKey struct {
@@ -267,8 +262,6 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	policy := config.Policy
 	var err error
 	uidEntries := policy.uidEntries
-	forceInterceptIPv4 := policy.forceInterceptIPv4
-	forceInterceptIPv6 := policy.forceInterceptIPv6
 	includeIPv4, includeIPv6 := policy.includeSource.ipv4, policy.includeSource.ipv6
 	excludeIPv4, excludeIPv6 := policy.excludeSource.ipv4, policy.excludeSource.ipv6
 	if err = checkLPMTriePolicyCompatibility(
@@ -299,6 +292,8 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		"tc_local_bypass_port":   {name: "sb_tc_lport", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.localBypassPortEntries)), 1), flags: bpfFlagNoPrealloc},
 		"tc_shared_bypass_port":  {name: "sb_tc_sport", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.sharedBypassPortEntries)), 1), flags: bpfFlagNoPrealloc},
 	}
+	addForceMapOverrides(mapOverrides, "tc_local", "sb_tc_lforce", policy.localForce)
+	addForceMapOverrides(mapOverrides, "tc_shared", "sb_tc_sforce", policy.sharedForce)
 	if config.EnableLocal {
 		selfMapCapacity := uint32(selfBypassSocketCapacity)
 		if config.SelfBypassMap != nil {
@@ -328,8 +323,6 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		DeliveryInterface: config.DeliveryInterface,
 		RoutingMark:       config.RoutingMark,
 		ListenerPort:      config.ListenerPort,
-		LocalDNSMode:      policy.localDNSMode,
-		SharedDNSMode:     policy.sharedDNSMode,
 	}
 	if len(includeIPv4)+len(includeIPv6) > 0 {
 		controlValue.Flags |= 1 << 12
@@ -355,16 +348,6 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	if len(policy.sharedInitialBypass.ipv6) > 0 {
 		controlValue.Flags |= tcFlagSharedBypassIPv6
 	}
-	if forceInterceptIPv4.IsValid() {
-		controlValue.Flags |= 1 << 10
-		controlValue.ForceInterceptIPv4Prefix = forceInterceptIPv4.Addr().As4()
-		controlValue.ForceInterceptIPv4Mask = prefixMask4(forceInterceptIPv4.Bits())
-	}
-	if forceInterceptIPv6.IsValid() {
-		controlValue.Flags |= 1 << 11
-		controlValue.ForceInterceptIPv6Prefix = forceInterceptIPv6.Addr().As16()
-		controlValue.ForceInterceptIPv6Mask = prefixMask16(forceInterceptIPv6.Bits())
-	}
 	backend := &TCBackend{
 		runtime:            &tcRuntime{maps: maps, programs: loadedPrograms},
 		tcpListenerMap:     config.EnableTCP && !legacyTCP,
@@ -385,7 +368,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		return nil, E.Errors(err, backend.Close())
 	}
 	if err = populateCompiledPolicyMaps(policyMapTargets{
-		Scope:             "TC eBPF",
+		Scope:          "TC eBPF",
+		LocalForceIPv4: maps["tc_local_force4"], LocalForceIPv6: maps["tc_local_force6"],
+		SharedForceIPv4: maps["tc_shared_force4"], SharedForceIPv6: maps["tc_shared_force6"],
 		UID:               maps["tc_uid_policy"],
 		LocalPort:         maps["tc_local_bypass_port"],
 		SharedPort:        maps["tc_shared_bypass_port"],
@@ -404,7 +389,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	}
 	if config.ICMPEchoReply {
 		backend.icmpEchoReply, err = PrepareICMPEchoReply(
-			config.EnableIPv4, config.EnableLocalIPv6, config.EnableSharedIPv6, forceInterceptIPv4, forceInterceptIPv6,
+			config.EnableIPv4, config.EnableLocalIPv6, config.EnableSharedIPv6, policy,
 		)
 		if err != nil {
 			return nil, E.Errors(err, backend.Close())
@@ -543,8 +528,8 @@ func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
 		SharedBypassPrivate: policy.sharedBypassPrivate,
 		LocalBypassPort:     len(policy.localBypassPortEntries) > 0,
 		SharedBypassPort:    len(policy.sharedBypassPortEntries) > 0,
-		ForceInterceptIPv4:  policy.forceInterceptIPv4.IsValid(),
-		ForceInterceptIPv6:  policy.forceInterceptIPv6.IsValid(),
+		ForceInterceptIPv4:  (len(policy.localForce.ipv4)+len(policy.sharedForce.ipv4) > 0),
+		ForceInterceptIPv6:  (len(policy.localForce.ipv6)+len(policy.sharedForce.ipv6) > 0),
 		IncludeSource:       len(policy.includeSource.ipv4)+len(policy.includeSource.ipv6) > 0,
 		ExcludeSource:       len(policy.excludeSource.ipv4)+len(policy.excludeSource.ipv6) > 0,
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,

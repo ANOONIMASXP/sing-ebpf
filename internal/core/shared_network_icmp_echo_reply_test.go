@@ -43,7 +43,7 @@ func newTestSharedPacketRewriteConfig(policy CompiledPolicy, icmpEchoReply bool)
 // ForceIntercept responder used by packet-rewrite.
 func TestPrepareSharedPacketRewriteLoadsICMPEchoReplyWhenRequested(t *testing.T) {
 	policy := newTestSharedNetworkForceInterceptPolicy(t, "198.18.0.0/15")
-	backend, err := PrepareSharedPacketRewrite(nil, newTestSharedPacketRewriteConfig(policy, true))
+	backend, err := PrepareSharedPacketRewrite(newTestSharedPacketRewriteConfig(policy, true))
 	if err != nil {
 		t.Skipf("cannot prepare a real shared-network eBPF backend in this environment: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestPrepareSharedPacketRewriteLoadsICMPEchoReplyWhenRequested(t *testing.T)
 // default, feature-off path costs nothing beyond the config check.
 func TestPrepareSharedPacketRewriteWithoutICMPEchoReplyLoadsNothingExtra(t *testing.T) {
 	policy := newTestSharedNetworkForceInterceptPolicy(t, "198.18.0.0/15")
-	backend, err := PrepareSharedPacketRewrite(nil, newTestSharedPacketRewriteConfig(policy, false))
+	backend, err := PrepareSharedPacketRewrite(newTestSharedPacketRewriteConfig(policy, false))
 	if err != nil {
 		t.Skipf("cannot prepare a real shared-network eBPF backend in this environment: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestPrepareSharedPacketRewriteWithoutICMPEchoReplyLoadsNothingExtra(t *test
 func TestPrepareSharedPacketRewriteRefusesICMPEchoReplyWithoutAPrefix(t *testing.T) {
 	before := openFDCount(t)
 	policy := newTestSharedNetworkForceInterceptPolicy(t, "")
-	backend, err := PrepareSharedPacketRewrite(nil, newTestSharedPacketRewriteConfig(policy, true))
+	backend, err := PrepareSharedPacketRewrite(newTestSharedPacketRewriteConfig(policy, true))
 	if err == nil {
 		_ = backend.Close()
 		t.Fatal("icmp_echo_reply=reply with no ForceIntercept prefix at all was reported as success")

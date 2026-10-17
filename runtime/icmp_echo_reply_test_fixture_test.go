@@ -85,7 +85,7 @@ func newRealICMPEchoSharedPacketRewriteBackendFor(t *testing.T, enableIPv6 bool)
 		t.Fatalf("compile policy: %v", err)
 	}
 	config.Policy = policy
-	backend, err := commonEBPF.PrepareSharedPacketRewrite(nil, config)
+	backend, err := commonEBPF.PrepareSharedPacketRewrite(config)
 	if err != nil {
 		t.Skipf("cannot prepare a real shared-network eBPF backend in this environment: %v", err)
 	}

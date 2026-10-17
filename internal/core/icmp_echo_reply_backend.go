@@ -3,7 +3,6 @@
 package core
 
 import (
-	"net/netip"
 	"sync"
 	"unsafe"
 
@@ -65,22 +64,20 @@ const (
 // native/icmp_echo_reply.bpf.c field for field; the _Static_assert in that file
 // is this struct's ABI contract.
 type icmpEchoReplyControl struct {
-	Flags                    uint32
-	ForceInterceptIPv4Prefix [4]byte
-	ForceInterceptIPv4Mask   [4]byte
-	ForceInterceptIPv6Prefix [16]byte
-	ForceInterceptIPv6Mask   [16]byte
+	Flags uint32
 }
 
 // loadICMPEchoReplyResources loads the object's two maps and four programs. The
 // maps are kept even though this object has no config-shaped sizing to do,
 // because loadObjectMaps drops any map not named in its overrides — the
 // overrides here exist to rename and place them, not to resize them.
-func loadICMPEchoReplyResources() (map[string]*CiliumEBPF.Map, []*CiliumEBPF.Program, error) {
+func loadICMPEchoReplyResources(policy CompiledPolicy) (map[string]*CiliumEBPF.Map, []*CiliumEBPF.Program, error) {
 	mapOverrides := map[string]mapSpecOverride{
 		"icmp_echo_reply_control": {name: "sb_icmp_ctl", mapType: CiliumEBPF.Array, maxEntries: 1},
 		"icmp_echo_reply_stats":   {name: "sb_icmp_stat", mapType: CiliumEBPF.PerCPUArray, maxEntries: icmpEchoReplyStatCount},
 	}
+	addForceMapOverrides(mapOverrides, "icmp_local", "sb_icmp_lforce", policy.localForce)
+	addForceMapOverrides(mapOverrides, "icmp_shared", "sb_icmp_sforce", policy.sharedForce)
 	maps, err := loadObjectMaps(loadICMPEchoReply, mapOverrides)
 	if err != nil {
 		return nil, nil, err
@@ -98,29 +95,27 @@ func loadICMPEchoReplyResources() (map[string]*CiliumEBPF.Map, []*CiliumEBPF.Pro
 	return maps, programs, nil
 }
 
-// PrepareICMPEchoReply loads the icmp_echo_reply object and populates its control
-// map. ipv4Enabled, localIPv6Enabled, and sharedIPv6Enabled mirror the same
-// address-family toggles the caller's own backend (TCBackend or
-// SharedPacketRewriteBackend) was configured with — this object answers on
-// whichever families and roles its caller actually intercepts, not a
-// second, independently-configured policy. At least one of forceInterceptIPv4 or
-// forceInterceptIPv6 must be valid; callers are expected to have already refused
-// icmp_echo_reply=reply with neither configured (see the consumer's config
-// validation), but this is checked again here so a backend can never exist
-// in a state that can never match anything.
+// PrepareICMPEchoReply loads a standalone responder with independent local and
+// shared destination sets. Family flags mirror the selected caller scopes.
 func PrepareICMPEchoReply(
 	ipv4Enabled bool,
 	localIPv6Enabled bool,
 	sharedIPv6Enabled bool,
-	forceInterceptIPv4 netip.Prefix,
-	forceInterceptIPv6 netip.Prefix,
+	policy CompiledPolicy,
 ) (*ICMPEchoReplyBackend, error) {
-	if !forceInterceptIPv4.IsValid() && !forceInterceptIPv6.IsValid() {
+	if len(policy.localForce.ipv4)+len(policy.localForce.ipv6)+len(policy.sharedForce.ipv4)+len(policy.sharedForce.ipv6) == 0 {
 		return nil, E.New("ICMP echo reply requires a configured force-intercept prefix")
 	}
-	maps, programs, err := loadICMPEchoReplyResources()
+	maps, programs, err := loadICMPEchoReplyResources(policy)
 	if err != nil {
 		return nil, E.Cause(err, "load icmp_echo_reply eBPF resources")
+	}
+	if err = populateCompiledPolicyMaps(policyMapTargets{
+		Scope:          "ICMP echo reply",
+		LocalForceIPv4: maps["icmp_local_force4"], LocalForceIPv6: maps["icmp_local_force6"],
+		SharedForceIPv4: maps["icmp_shared_force4"], SharedForceIPv6: maps["icmp_shared_force6"],
+	}, policy); err != nil {
+		return nil, E.Errors(err, closeObjectResources(programs, maps))
 	}
 	control := icmpEchoReplyControl{}
 	if ipv4Enabled {
@@ -131,16 +126,6 @@ func PrepareICMPEchoReply(
 	}
 	if sharedIPv6Enabled {
 		control.Flags |= icmpEchoReplyFlagSharedIPv6
-	}
-	if forceInterceptIPv4.IsValid() {
-		control.Flags |= icmpEchoReplyFlagForceInterceptIPv4
-		control.ForceInterceptIPv4Prefix = forceInterceptIPv4.Addr().As4()
-		control.ForceInterceptIPv4Mask = prefixMask4(forceInterceptIPv4.Bits())
-	}
-	if forceInterceptIPv6.IsValid() {
-		control.Flags |= icmpEchoReplyFlagForceInterceptIPv6
-		control.ForceInterceptIPv6Prefix = forceInterceptIPv6.Addr().As16()
-		control.ForceInterceptIPv6Mask = prefixMask16(forceInterceptIPv6.Bits())
 	}
 	control.Flags |= icmpEchoReplyFlagEnabled
 	controlFD := maps["icmp_echo_reply_control"].FD()

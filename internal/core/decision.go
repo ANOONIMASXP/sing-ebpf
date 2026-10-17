@@ -35,6 +35,10 @@ type PortDecision struct {
 	Protocol uint8
 	Port     uint16
 	Action   Decision
+	// AfterSelectors applies this action only after UID/source selection.
+	// Otherwise it precedes selectors. Safety and mandatory destination
+	// interception retain precedence in either case.
+	AfterSelectors bool
 }
 
 // UIDDecision is a UID range match with an already compiled final action.

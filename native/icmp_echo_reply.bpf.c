@@ -56,15 +56,9 @@
 // the TC data plane's policy surface.
 struct sb_icmp_echo_reply_control {
     __u32 flags;
-    __u8 force_intercept_ipv4_prefix[4];
-    __u8 force_intercept_ipv4_mask[4];
-    __u8 force_intercept_ipv6_prefix[16];
-    __u8 force_intercept_ipv6_mask[16];
 };
 
-_Static_assert(sizeof(struct sb_icmp_echo_reply_control) == 44, "sb_icmp_echo_reply_control ABI size");
-_Static_assert(__builtin_offsetof(struct sb_icmp_echo_reply_control, force_intercept_ipv6_mask) == 28,
-    "sb_icmp_echo_reply_control force_intercept_ipv6_mask ABI offset");
+_Static_assert(sizeof(struct sb_icmp_echo_reply_control) == 4, "sb_icmp_echo_reply_control ABI size");
 
 struct ethernet_header {
     __u8 destination[6];
@@ -123,6 +117,9 @@ struct icmp_echo_header {
         .max_entries = entries, \
     }
 
+SB_FORCE_MAPS(icmp_local);
+SB_FORCE_MAPS(icmp_shared);
+
 MAP(icmp_echo_reply_control, __u32, struct sb_icmp_echo_reply_control, BPF_MAP_TYPE_ARRAY, 1U);
 
 // icmp_echo_reply_stats counts three outcomes for this object's own decisions,
@@ -143,6 +140,9 @@ MAP(icmp_echo_reply_control, __u32, struct sb_icmp_echo_reply_control, BPF_MAP_T
 MAP(icmp_echo_reply_stats, __u32, __u64, BPF_MAP_TYPE_PERCPU_ARRAY, SB_ICMP_ECHO_REPLY_STAT_COUNT);
 
 static void *(*map_lookup)(void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
+SB_FORCE_LOOKUP(icmp_local)
+SB_FORCE_LOOKUP(icmp_shared)
+
 static long (*redirect)(int ifindex, __u64 flags) = (void *)BPF_FUNC_redirect;
 static long (*skb_store_bytes)(void *ctx, __u32 offset, const void *from, __u32 length, __u64 flags) =
     (void *)BPF_FUNC_skb_store_bytes;
@@ -237,7 +237,7 @@ INLINE bool swap_ethernet_addresses(struct __sk_buff *skb) {
 // destination, wrong type/code, or too short to read the rest -- is exactly
 // what SB_ICMP_ECHO_REPLY_STAT_PASS_THROUGH exists to count.
 INLINE bool find_ipv4_echo_request(void *data, void *data_end, __u32 packet_length, __u32 l3_offset,
-    const struct sb_icmp_echo_reply_control *control, struct ipv4_header **ip, struct icmp_echo_header **icmp) {
+    bool shared, struct ipv4_header **ip, struct icmp_echo_header **icmp) {
     struct ipv4_header *header = data + l3_offset;
     if ((void *)(header + 1) > data_end) return false;
     if (header->protocol != IPPROTO_ICMP_VALUE) return false;
@@ -260,9 +260,7 @@ INLINE bool find_ipv4_echo_request(void *data, void *data_end, __u32 packet_leng
     }
     __u8 destination[4];
     __builtin_memcpy(destination, &header->destination, 4U);
-    if (!sb_ebpf_force_intercept_ipv4(
-            destination, control->flags, SB_ICMP_ECHO_REPLY_FLAG_FORCE_INTERCEPT_IPV4,
-            control->force_intercept_ipv4_prefix, control->force_intercept_ipv4_mask)) {
+    if (!(shared ? icmp_shared_force_ipv4(destination) : icmp_local_force_ipv4(destination))) {
         record_icmp_echo_reply_stat(SB_ICMP_ECHO_REPLY_STAT_PASS_THROUGH);
         return false;
     }
@@ -291,7 +289,7 @@ INLINE bool find_ipv4_echo_request(void *data, void *data_end, __u32 packet_leng
 // protocol at all" and "this protocol, but disqualified" are not the same
 // thing to count.
 INLINE bool find_ipv6_echo_request(void *data, void *data_end, __u32 packet_length, __u32 l3_offset,
-    const struct sb_icmp_echo_reply_control *control, struct ipv6_header **ip, struct icmp_echo_header **icmp) {
+    bool shared, struct ipv6_header **ip, struct icmp_echo_header **icmp) {
     struct ipv6_header *header = data + l3_offset;
     if ((void *)(header + 1) > data_end) return false;
     if (header->next_header != IPPROTO_ICMPV6_VALUE) return false;
@@ -308,9 +306,7 @@ INLINE bool find_ipv6_echo_request(void *data, void *data_end, __u32 packet_leng
         record_icmp_echo_reply_stat(SB_ICMP_ECHO_REPLY_STAT_PASS_THROUGH);
         return false;
     }
-    if (!sb_ebpf_force_intercept_ipv6(
-            header->destination, control->flags, SB_ICMP_ECHO_REPLY_FLAG_FORCE_INTERCEPT_IPV6,
-            control->force_intercept_ipv6_prefix, control->force_intercept_ipv6_mask)) {
+    if (!(shared ? icmp_shared_force_ipv6(header->destination) : icmp_local_force_ipv6(header->destination))) {
         record_icmp_echo_reply_stat(SB_ICMP_ECHO_REPLY_STAT_PASS_THROUGH);
         return false;
     }
@@ -467,7 +463,7 @@ INLINE int local_reply(struct __sk_buff *skb, bool ethernet) {
     if (ether_type == ETH_P_IP_VALUE && (control->flags & SB_ICMP_ECHO_REPLY_FLAG_IPV4) != 0U) {
         struct ipv4_header *ip;
         struct icmp_echo_header *icmp;
-        if (!find_ipv4_echo_request(data, data_end, skb->len, l3_offset, control, &ip, &icmp)) return TC_ACT_UNSPEC;
+        if (!find_ipv4_echo_request(data, data_end, skb->len, l3_offset, false, &ip, &icmp)) return TC_ACT_UNSPEC;
         __be32 old_source = ip->source;
         __be32 old_destination = ip->destination;
         __u8 old_type = icmp->type;
@@ -480,7 +476,7 @@ INLINE int local_reply(struct __sk_buff *skb, bool ethernet) {
     if (ether_type == ETH_P_IPV6_VALUE && (control->flags & SB_ICMP_ECHO_REPLY_FLAG_LOCAL_IPV6) != 0U) {
         struct ipv6_header *ip;
         struct icmp_echo_header *icmp;
-        if (!find_ipv6_echo_request(data, data_end, skb->len, l3_offset, control, &ip, &icmp)) return TC_ACT_UNSPEC;
+        if (!find_ipv6_echo_request(data, data_end, skb->len, l3_offset, false, &ip, &icmp)) return TC_ACT_UNSPEC;
         __u8 old_addresses[32];
         __builtin_memcpy(old_addresses, ip->source, 16U);
         __builtin_memcpy(old_addresses + 16U, ip->destination, 16U);
@@ -528,7 +524,7 @@ INLINE int shared_reply(struct __sk_buff *skb, bool ethernet) {
     if (ether_type == ETH_P_IP_VALUE && (control->flags & SB_ICMP_ECHO_REPLY_FLAG_IPV4) != 0U) {
         struct ipv4_header *ip;
         struct icmp_echo_header *icmp;
-        if (!find_ipv4_echo_request(data, data_end, skb->len, l3_offset, control, &ip, &icmp)) return TC_ACT_UNSPEC;
+        if (!find_ipv4_echo_request(data, data_end, skb->len, l3_offset, true, &ip, &icmp)) return TC_ACT_UNSPEC;
         __be32 old_source = ip->source;
         __be32 old_destination = ip->destination;
         __u8 old_type = icmp->type;
@@ -541,7 +537,7 @@ INLINE int shared_reply(struct __sk_buff *skb, bool ethernet) {
     if (ether_type == ETH_P_IPV6_VALUE && (control->flags & SB_ICMP_ECHO_REPLY_FLAG_SHARED_IPV6) != 0U) {
         struct ipv6_header *ip;
         struct icmp_echo_header *icmp;
-        if (!find_ipv6_echo_request(data, data_end, skb->len, l3_offset, control, &ip, &icmp)) return TC_ACT_UNSPEC;
+        if (!find_ipv6_echo_request(data, data_end, skb->len, l3_offset, true, &ip, &icmp)) return TC_ACT_UNSPEC;
         __u8 old_addresses[32];
         __builtin_memcpy(old_addresses, ip->source, 16U);
         __builtin_memcpy(old_addresses + 16U, ip->destination, 16U);

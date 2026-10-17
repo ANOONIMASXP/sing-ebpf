@@ -16,7 +16,7 @@ cd "$work/linux-$version"
 make x86_64_defconfig
 scripts/config --disable DEBUG_INFO --disable DEBUG_INFO_BTF --disable SECURITY_SELINUX \
   --enable BPF --enable BPF_SYSCALL --enable BPF_JIT --enable BPF_EVENTS \
-  --enable CGROUPS --enable CGROUP_BPF --enable NET_NS --enable VETH --enable DUMMY \
+  --enable CGROUPS --enable CGROUP_BPF --enable NET_NS --enable VETH --enable DUMMY --enable TUN \
   --enable NET_SCHED --enable NET_CLS_BPF --enable NET_CLS_ACT --enable NET_SCH_INGRESS \
   --enable NET_CLS_U32 --enable NET_ACT_BPF --enable NET_ACT_MIRRED \
   --enable NETFILTER --enable NF_CONNTRACK --enable NF_NAT --enable IP_NF_IPTABLES \

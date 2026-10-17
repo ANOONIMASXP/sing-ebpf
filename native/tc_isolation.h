@@ -5,6 +5,14 @@
 // transport checksums remain untouched in both directions.
 #define SB_TC_DELIVERY_MAGIC 0x53425443U
 #define SB_TC_RETURN_ETHERNET 0x100U
+#define SB_TC_ACTIVITY_REFRESH_NS 1000000000ULL
+
+// Activity is an idle-cleanup hint, not packet accounting. Coalesce writes
+// while preserving immediate publication of identity/generation changes.
+INLINE void refresh_tc_activity(__u64 *last_seen, __u64 now) {
+    if (now > *last_seen && now - *last_seen >= SB_TC_ACTIVITY_REFRESH_NS)
+        *last_seen = now;
+}
 
 struct sb_tc_return_value {
     __u64 last_seen_ns;
@@ -77,7 +85,7 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
         increment_stat(SB_TC_STAT_RETURN_CONFLICT);
         return TC_ACT_SHOT;
     }
-    existing->last_seen_ns = now;
+    refresh_tc_activity(&existing->last_seen_ns, now);
 
     struct sb_tc_assign_value *previous = map_lookup(&tc_assignment, flow);
     struct sb_tc_assign_value assignment = {
@@ -89,7 +97,7 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
     if (previous != 0 && previous->socket_cookie == cookie && previous->ifindex == value.ifindex &&
         previous->path == path && previous->source_mac_valid == assignment.source_mac_valid &&
         source_mac_equal(previous->source_mac, assignment.source_mac)) {
-        previous->last_seen_ns = now;
+        refresh_tc_activity(&previous->last_seen_ns, now);
     } else if (map_update(&tc_assignment, flow, &assignment, BPF_ANY) != 0) {
         increment_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
         return TC_ACT_SHOT;
@@ -189,7 +197,7 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
         return TC_ACT_SHOT;
     }
     struct sb_tc_return_value value = *entry;
-    if (fragment.state != 2U) entry->last_seen_ns = now;
+    if (fragment.state != 2U) refresh_tc_activity(&entry->last_seen_ns, now);
     if (fragment.state == 1U) {
         value.last_seen_ns = now;
         if (map_update(&tc_return_frag, &fragment_key, &value, BPF_ANY) != 0) {

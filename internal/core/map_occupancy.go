@@ -117,25 +117,7 @@ func InspectMapOccupancy() MapOccupancyReport {
 			_ = m.Close()
 			continue
 		}
-		item := MapOccupancy{
-			ID: id, Name: info.Name, Category: metadataForMapName(info.Name).category, Type: info.Type.String(),
-			MaxEntries: info.MaxEntries, KeySize: info.KeySize,
-			ValueSize: info.ValueSize, Flags: info.Flags,
-		}
-		if !occupancySupported(info.Type) {
-			item.Error = "map type does not support safe key iteration"
-			item.Pressure = "not_applicable"
-			report.Maps = append(report.Maps, item)
-			_ = m.Close()
-			continue
-		}
-		item.Supported = true
-		item.Entries, err = countMapKeys(m, info.KeySize, info.MaxEntries)
-		if err != nil {
-			item.Error = err.Error()
-		}
-		item.Pressure = mapPressure(item.Category, item.Entries, item.MaxEntries, item.Error != "")
-		report.Maps = append(report.Maps, item)
+		report.Maps = append(report.Maps, inspectMapOccupancy(m, id, info))
 		_ = m.Close()
 	}
 	sort.Slice(report.Maps, func(i, j int) bool { return report.Maps[i].Name < report.Maps[j].Name })
@@ -145,11 +127,32 @@ func InspectMapOccupancy() MapOccupancyReport {
 	return report
 }
 
+func inspectMapOccupancy(m *CiliumEBPF.Map, id CiliumEBPF.MapID, info *CiliumEBPF.MapInfo) MapOccupancy {
+	item := MapOccupancy{ID: id, Name: info.Name, Category: metadataForMapName(info.Name).category, Type: info.Type.String(),
+		MaxEntries: info.MaxEntries, KeySize: info.KeySize, ValueSize: info.ValueSize, Flags: info.Flags}
+	if !occupancySupported(info.Type) {
+		item.Pressure = "not_applicable"
+		return item
+	}
+	item.Supported = true
+	var err error
+	item.Entries, err = countMapKeys(m, info.KeySize, info.MaxEntries)
+	if err != nil {
+		item.Error = err.Error()
+	}
+	item.Pressure = mapPressure(item.Category, item.Entries, item.MaxEntries, item.Error != "")
+	return item
+}
+
 func mapOccupancyStatus(maps []MapOccupancy) string {
 	status := "pass"
 	for _, item := range maps {
 		if item.Pressure == "degraded" || item.Pressure == "recovery_failed" {
 			return "degraded"
+		} else if item.Pressure == "unavailable" {
+			if status == "pass" {
+				status = "unknown"
+			}
 		} else if item.Pressure == "warning" {
 			status = "warning"
 		}

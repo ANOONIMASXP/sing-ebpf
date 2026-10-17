@@ -144,8 +144,10 @@ func (b *TCBackend) ReleaseReturnRoute(handle TCReturnHandle) {
 // Caller holds b.access. The reference lock serializes acquisition with idle
 // cleanup, so a live consumer cannot lose its route to a maintenance pass.
 func (b *TCBackend) sweepReturnRoutesLocked(maxIdle time.Duration, budget uint32, result *TCAssignmentSweepResult) error {
+	result.FailureMap = "sb_tc_return"
 	returnMap := b.runtime.maps["tc_return"]
 	if returnMap == nil {
+		result.Failure = TCAssignmentSweepFailureClosed
 		return errBackendClosed
 	}
 	now := monotonicNowNS()
@@ -188,11 +190,10 @@ func (b *TCBackend) sweepReturnRoutesLocked(maxIdle time.Duration, budget uint32
 		b.returnSweepRemoved = 0
 		result.Pressure = result.Pressure || uint64(result.ReturnUsage.Entries)*100 >= uint64(result.ReturnUsage.Capacity)*70
 	}
-	// An incomplete return scan cannot establish the low-water exit condition.
-	result.UsageKnown = result.UsageKnown && result.ReturnUsageKnown
 	// Fragment cache entries have a fixed short lifetime and no userspace
 	// readers. Reclaim expired entries without touching live flow references.
 	if fragmentMap := b.runtime.maps["tc_return_frag"]; fragmentMap != nil {
+		result.FailureMap = "sb_tc_rfrag"
 		candidates = candidates[:0]
 		scan, err = b.returnFragmentSweepScratch.scan(fragmentMap, min(b.assignmentCapacity, 1024), budget, func(key tcAssignKey, value tcReturnValue) {
 			if now > value.LastSeenNS && now-value.LastSeenNS > uint64(2*time.Second) {

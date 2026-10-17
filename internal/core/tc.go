@@ -158,9 +158,9 @@ type TCAssignment struct {
 }
 
 // TCAssignmentSweepResult describes one bounded cleanup pass. Entries are
-// removed only when they were observed by userspace, remained unchanged since
-// observation, and exceeded maxIdle. Unobserved kernel entries remain under
-// the LRU safety net because userspace cannot prove their age.
+// removed after their kernel timestamp exceeds maxIdle and an immediate
+// value/generation recheck still matches. The per-map scan budget also applies
+// on batch-capable kernels; Complete covers assignment, return and fragments.
 type TCAssignmentSweepResult struct {
 	ReturnUsage      MapUsage
 	ReturnUsageKnown bool
@@ -177,7 +177,8 @@ type TCAssignmentSweepResult struct {
 	// Failure classifies a failed maintenance pass without requiring callers
 	// to parse platform-specific errno text. An empty value means the pass
 	// completed (or is a normal partial traversal).
-	Failure string
+	Failure    string
+	FailureMap string
 }
 
 const (
@@ -740,7 +741,7 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	if b.runtime == nil || b.runtime.maps["tc_assignment"] == nil {
 		return TCAssignmentSweepResult{Failure: TCAssignmentSweepFailureClosed}, errBackendClosed
 	}
-	result := TCAssignmentSweepResult{Usage: MapUsage{Capacity: b.assignmentCapacity}}
+	result := TCAssignmentSweepResult{Usage: MapUsage{Capacity: b.assignmentCapacity}, FailureMap: "sb_tc_assign"}
 	now := monotonicNowNS()
 	maxIdleNS := uint64(maxIdle)
 	staleBefore := now - min(now, maxIdleNS)
@@ -789,6 +790,7 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	if err = b.sweepReturnRoutesLocked(max(maxIdle, time.Second), fallbackBudget, &result); err != nil {
 		return result, err
 	}
+	result.FailureMap = ""
 	return result, nil
 }
 

@@ -53,6 +53,7 @@ type (
 	KernelProbeReport              = core.KernelProbeReport
 	RuntimeProgram                 = core.RuntimeProgram
 	RuntimeState                   = core.RuntimeState
+	RuntimeResources               = core.RuntimeResources
 	MapCategory                    = core.MapCategory
 	MapOccupancy                   = core.MapOccupancy
 	MapOccupancyReport             = core.MapOccupancyReport
@@ -570,4 +571,27 @@ func WriteKernelProbeReport(writer io.Writer, report *KernelProbeReport) error {
 
 func WriteKernelProbeReportJSON(writer io.Writer, report *KernelProbeReport) error {
 	return core.WriteKernelProbeReportJSON(writer, report)
+}
+func (b *TCBackend) RuntimeResources() RuntimeResources {
+	if b == nil {
+		return RuntimeResources{}
+	}
+	return core.UnwrapTCBackend(b).RuntimeResources()
+}
+func (b *SharedPacketRewriteBackend) RuntimeResources() RuntimeResources {
+	if b == nil {
+		return RuntimeResources{}
+	}
+	return core.UnwrapSharedPacketRewriteBackend(b).RuntimeResources()
+}
+func (b *SelfBypass) RuntimeResources() RuntimeResources {
+	if b == nil {
+		return RuntimeResources{}
+	}
+	return core.UnwrapSelfBypass(b).RuntimeResources()
+}
+
+// InspectRuntimeResources inspects only the IDs supplied by resource owners.
+func InspectRuntimeResources(owners ...RuntimeResources) RuntimeState {
+	return core.InspectRuntimeResources(owners...)
 }

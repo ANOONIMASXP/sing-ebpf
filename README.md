@@ -77,7 +77,27 @@ instead of maintaining a map-name classification list.
 
 ## Packet paths
 
-The library has four concrete backend choices: local `tc` or `cgroup`, and
+### Independent mechanism selection
+
+`cgroup` and `packet_rewrite` are compatibility-oriented.
+`socket_assign` is experimental and requires more kernel capabilities; it
+preserves TCP **and** UDP tuples in a private namespace. Migrate the old local
+name `tc` to `socket_assign`; it is not an alias.
+
+| Local | Shared | Mechanisms |
+| --- | --- | --- |
+| cgroup | packet_rewrite | Socket-address + Ethernet packet rewrite; no assignment namespace |
+| cgroup | socket_assign | cgroup hooks + independent shared assignment namespace |
+| socket_assign | packet_rewrite | Local assignment namespace + independent shared rewrite |
+| socket_assign | socket_assign | One assignment engine/namespace, independent scope policies |
+
+Either scope can run alone. TCP/UDP selection applies to enabled scopes;
+IPv6 is independent per scope. Disabled paths cannot enable another path's
+IPv6 listener or change its policy. Optional cgroup self-bypass/process
+tracking is not a mandatory dependency of socket assignment. Missing
+capabilities fail startup explicitly; no mechanism silently changes.
+
+The library has three mechanisms and four selectable scope paths: local `socket_assign` or `cgroup`, and
 shared `socket_assign` or `packet_rewrite`. A consumer may enable either path
 independently. Exported capability probes can load and close selected generated
 objects without attaching them, but attachment and network-state validation
@@ -109,16 +129,15 @@ selection use their own IPv6 flags; isolated delivery accepts either enabled fam
 Both flags are static for the lifetime of the inbound.
 
 Consumers create `runtime.NewTCNamespace` before their transparent listeners,
-use its `Path()` for TCP, UDP and transparent UDP reply sockets, set
-`TCConfig.Isolated`, and pass the namespace to `runtime.NewTCRuntime`.
+use its `Path()` for TCP, UDP and transparent UDP reply sockets, and pass the namespace to `runtime.NewTCRuntime`.
 Outbound dialers stay in the host namespace. Close the runtime and sockets
 before closing the caller-owned namespace. No named namespace, mount point,
 holder process, host NAT rule, or host-wide sysctl change is needed.
 Bind isolated UDP listeners to `127.0.0.1` / `::1`; TCP listeners remain wildcard.
 The UDP lookup uses loopback without changing the received packet's tuple,
 avoiding conflicts when a remote UDP endpoint has the listener's own port.
-The low-level non-isolated backend remains available to existing embedders;
-sing-box uses the isolated path for both local TC and shared socket assignment.
+A namespace is mandatory for socket assignment; the host-namespace alternative
+and `TCConfig.Isolated` switch have been removed.
 
 The host veth ingress returns replies directly to the recorded original
 interface (ingress for local clients; egress for shared clients), outside host
@@ -139,7 +158,7 @@ drops the fragment and increments the return-lookup failure counter.
 Fragmented IPv4 datagrams and non-atomic IPv6 fragments bypass before policy
 selection. IPv6 atomic fragments continue through extension-header parsing.
 
-### Optional local cgroup path
+### Compatibility-oriented local cgroup path
 
 The cgroup backend attaches connect and UDP sendmsg/recvmsg programs to the
 selected cgroup v2 directory. A selected destination is replaced with a token
@@ -237,11 +256,12 @@ disabled and interface filters are detached.
 
 The programs first apply path-specific address-family, protocol, fragment,
 service-traffic, and safety gates. Application-supplied force-intercept prefixes
-force interception before other policy. DNS `off` bypasses and DNS `hijack`
-intercepts before UID or shared source
-policy. DNS `respect_policy` applies UID/source policy first, then intercepts
-before host, private-address, and destination-CIDR bypass. Other traffic applies
-the same source policy followed by those destination bypasses.
+force interception before other policy. Local and shared force-prefix sets
+are independent and support multiple prefixes per family. Port actions run
+before source selectors by default, or after selectors when
+`PortDecision.AfterSelectors` is true; then destination bypass applies.
+Port 53 has no special meaning in native code. Consumers such as sing-box
+compile DNS modes into these generic port actions.
 
 Local egress checks the socket-cookie self-bypass map. Shared source CIDR and
 MAC include/exclude policies are evaluated only on the shared path. If either
@@ -331,7 +351,7 @@ For local cgroup mode, the consumer selects redirect prefixes and supplies
 listeners; the backend prepares routes and maps, loads the enabled program set,
 and attaches it last. Shared `packet_rewrite` uses separate listeners and token
 routes. Isolated shared `socket_assign` uses the same namespace listeners,
-bidirectional veth and private policy routing as local TC. Any combination of
+bidirectional veth and private policy routing as local socket assignment. Any combination of
 local and shared choices is valid. Shutdown
 detaches each selected backend and removes only routes owned by that instance. A
 disabled path does not load its object or create network state.
@@ -347,7 +367,7 @@ release number alone insufficient.
 
 Use a Linux kernel with BPF syscall support, cgroup v2 when the local
 `cgroup` path is enabled, and the TC classifier facilities required by the
-selected path. Isolated local TC and shared socket assignment additionally need
+selected path. Isolated local socket assignment and shared socket assignment additionally need
 `CONFIG_NET_NS`, `CONFIG_VETH`, `CAP_SYS_ADMIN` for `unshare`/`setns`, and
 `CAP_NET_ADMIN` for private routes, links and transparent sockets. These
 facilities predate `bpf_sk_assign` and do not raise that path's upstream kernel
@@ -376,7 +396,7 @@ commonly restrict cgroup hooks or TCX independently; runtime fallbacks are
 selected separately. A denied optional socket-release or process-tracking hook
 does not by itself make the main data plane unsupported.
 
-Isolated local TC and shared socket assignment also need vendor namespace
+Isolated local socket assignment and shared socket assignment also need vendor namespace
 creation/reentry permissions (including SELinux), veth, TC, routes and sysctls;
 cgroup-only local interception does not need veth or TC. Shared
 `packet_rewrite` requires an Ethernet-framed downstream interface, while

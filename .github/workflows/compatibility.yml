@@ -1,0 +1,67 @@
+name: Kernel compatibility
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: kernel-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernel:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: [5.4.290, 5.10.240, 6.6.110]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.25.5
+      - name: Install guest and kernel build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-guest-agent ovmf build-essential flex bison libssl-dev libelf-dev bc iptables
+      - name: Cache test kernel
+        id: kernel-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/test-kernel/bzImage
+            ${{ runner.temp }}/test-kernel/kernel.config
+          key: ebpf-kernel-${{ matrix.kernel }}-${{ hashFiles('.github/scripts/build-test-kernel.sh') }}
+      - name: Build pinned test kernel
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        run: bash .github/scripts/build-test-kernel.sh ${{ matrix.kernel }} "${{ runner.temp }}/test-kernel"
+      - name: Install pinned VM runner
+        run: cargo install vmtest --version 0.18.0 --locked
+      - name: Build integration binaries
+        run: |
+          mkdir -p .kernel-tests
+          CGO_ENABLED=0 go test -c -tags with_ebpf,ebpf_integration -o .kernel-tests/core.test ./internal/core
+          CGO_ENABLED=0 go test -c -tags with_ebpf,ebpf_integration -o .kernel-tests/runtime.test ./runtime
+      - name: Test selected paths in guest kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.kernel }}" == 5.4.* ]]; then
+            # sk_assign arrived later. Require actual compatibility-path object
+            # loads; do not count a skipped socket-assignment test as success.
+            command='SING_EBPF_INTEGRATION=1 .kernel-tests/core.test -test.v -test.run "TestCompatibilityObjectsIntegration|TestSharedPacketRewrite.*Integration|TestMapScanBudgetIntegration|TestRuntimeInspectionUsesOwnerIDs"'
+          else
+            command='SING_EBPF_INTEGRATION=1 .kernel-tests/core.test -test.v && SING_EBPF_INTEGRATION=1 .kernel-tests/runtime.test -test.v'
+          fi
+          sudo "$HOME/.cargo/bin/vmtest" -k "${{ runner.temp }}/test-kernel/bzImage" "$command" 2>&1 | tee kernel-test.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: kernel-${{ matrix.kernel }}
+          path: |
+            kernel-test.log
+            ${{ runner.temp }}/test-kernel/kernel.config
+          retention-days: 14

@@ -276,7 +276,7 @@ fallback instead of treating TCX as universally available.
 The privileged matrix should cover all affected combinations:
 
 - IPv4 and IPv6; TCP and UDP;
-- local TC and cgroup; shared socket assignment and packet rewrite;
+- local socket assignment and cgroup; shared socket assignment and packet rewrite;
 - Ethernet and supported raw-IP framing where applicable;
 - object-load and attach fallback selection;
 - interface absence, recreation, role change, and ifindex reuse;
@@ -353,3 +353,21 @@ consumer builds with and without eBPF support
 Keep implementation commits reviewable and independently revertible. A release
 tag marks a tested compatibility point; it should not be created for every
 commit.
+
+## Compatibility CI and performance evidence
+
+`Kernel compatibility` builds checksum-pinned 5.4.290, 5.10.240 and 6.6.110
+kernels with vmtest 0.18.0. The 5.4 job requires cgroup/packet-rewrite object loads
+and packet fixtures; it excludes socket assignment. Later jobs run the full
+namespace suite with optional TCX fallback. Host tests do not prove these
+guest jobs, OpenWrt firmware or Android vendor kernels passed; check their logs.
+
+Benchmark without concurrent compilation:
+`go test -bench BenchmarkOOBBatchReceive -benchmem ./common/udpio` in sing-box,
+and as root here:
+`SING_EBPF_INTEGRATION=1 go test -tags with_ebpf,ebpf_integration ./internal/core -run '^$' -bench BenchmarkTCSharedSteadyFlow`.
+
+On development WSL x86-64, eight-packet loopback receive metadata reuse reduced
+10 allocations/~968 B to 8 allocations/~516–521 B per batch. TC timestamp
+coalescing measured 115–118 kernel ns/packet versus 113–120 before: no clear
+single-core speedup. These are not real-device throughput or latency claims.

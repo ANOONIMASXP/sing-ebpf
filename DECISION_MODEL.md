@@ -26,21 +26,22 @@ the selected data planes:
 | local | UID, destination CIDR, destination port | UID/package selection, DNS/FakeIP/private/rule-set priority |
 | shared | source CIDR, source MAC, destination CIDR, destination port | downstream selection and source-policy meaning |
 
-The current sing-box adapter enforces this mapping before calling the library:
-local source CIDR/MAC and shared UID decisions are invalid for its four data
-paths. Other consumers must apply the same integration-side validation rather
-than relying on sing-ebpf to interpret or reject application scope semantics.
+The library validates scope constraints, actions, ranges, prefixes, protocols,
+capacities and ABI constraints. Consumers translate their own options but must
+not duplicate library validation or pass disabled-scope policy into unrelated
+paths. Local/shared force-prefix sets are independent and may each contain
+multiple IPv4/IPv6 prefixes.
 
-The library still validates every primitive action, range, prefix, protocol,
-capacity, and ABI constraint that it can express. It does not validate whether
-a valid primitive belongs to a particular application's local/shared model.
+Port actions encode pass/intercept plus `AfterSelectors`. Priority ports run
+before UID/source selectors; after-selector ports run after them but before
+destination bypass. There is no native DNS mode or port-53 special case.
 
 ## Runtime status
 
 All four data paths now have action-level update entry points:
 
 1. cgroup socket hooks: `CgroupBackend.UpdateDestinationDecisions`;
-2. local TC: `TCBackend.UpdateLocalDestinationDecisions`;
+2. local socket assignment: `TCBackend.UpdateLocalDestinationDecisions`;
 3. shared TC socket assignment: `TCBackend.UpdateSharedDestinationDecisions`;
 4. shared packet rewrite: `SharedPacketRewriteBackend.UpdateDestinationDecisions`.
 
@@ -95,7 +96,7 @@ inputs: listener descriptors, redirect prefixes, interfaces, cgroup path,
 map capacities, and network-generation state. They are not policy decisions.
 
 The migration is intentionally ordered by blast radius: cgroup first, then
-local TC, shared TC socket assignment, and finally shared packet rewrite. A
+local socket assignment, shared TC socket assignment, and finally shared packet rewrite. A
 path is not considered migrated merely because its Go type contains
 `Decision`; its native program must consume action-valued maps and its tests
 must prove pass/intercept behavior for overlapping rules and update rollback.

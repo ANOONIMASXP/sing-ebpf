@@ -25,7 +25,7 @@ interpreting their own configuration and route rules.
 | Path | Root package owns | `runtime` owns | Consumer owns |
 | --- | --- | --- | --- |
 | local cgroup | object selection, token/original maps, redirect routes, cgroup links, release cleanup | none | listeners, accepted TCP metadata, UDP NAT/session state, UID/package policy |
-| local TC | programs/maps, policy compiler, listeners, assignments, cookie self-bypass | default-interface attachment, delivery veth, policy routing, sysctls, reconciliation | listener/session handling, process metadata, interface events, diagnostics presentation |
+| local socket assignment | programs/maps, scoped policy, assignment/return state, cookie self-bypass | default-interface attachment, private-netns delivery veth and routing, reconciliation | namespace lifetime, listeners/sessions, process metadata, interface events, diagnostics |
 | shared socket assignment | programs/maps, assignments, return routes, source policy | downstream attachment, isolated delivery veth, private policy routing, reconciliation | namespace lifetime, listeners, shared-source metadata, TCP/UDP handling |
 | shared packet rewrite | rewrite programs/maps, flow lookup/update and counters | downstream attachment, `route_localnet`, health and rollback | token listeners, userspace flow lifecycle, policy translation, warning presentation |
 
@@ -195,3 +195,24 @@ Echo Reply paths.
 Verify consumer builds with `with_ebpf` both enabled and disabled and generated
 objects for little- and big-endian targets. `boundary_test.go` must continue to
 reject every sing-box or sing-tun import anywhere in the source and test tree.
+
+## Maintenance and diagnostics
+
+Shared rewrite and TC assignment/return jobs use one bounded scheduling model,
+with independent cursors, deadlines and pressure state. Activity coalesces;
+partial scans continue shortly, failures back off, and a minute watchdog
+observes kernel-only allocations. Complete scans are required to clear pressure.
+Each map receives at most the per-pass budget, including batch lookups.
+Batch fallback resets traversal accounting; purge and orphan scans use separate
+cursors.
+
+Return-map enumeration does not hold the reference mutex. Deletion locks one
+candidate and rechecks references, generation and activity. This is a userspace
+recheck, not atomic compare-and-delete against a concurrent kernel writer.
+Return handles pin live consumers. One-second activity hints have a minimum
+two-second cleanup grace.
+
+`RuntimeResources` snapshots resource IDs from owners.
+`InspectRuntimeResources` reads only those IDs and reports shutdown races
+as unavailable, not empty. Global name inspection is a standalone debugging
+tool, never proof of inbound ownership. IDs are metadata, not closeable handles.

@@ -22,7 +22,7 @@ case "$(uname -r)" in
   4.19.*)
     export SING_EBPF_KERNEL_PROFILE=legacy419
     run_required .kernel-tests/core.test '^(TestLegacy419CapabilitiesIntegration|TestSharedPacketRewrite.*Integration|TestMapScanBudgetIntegration)$'
-    run_required .kernel-tests/runtime.test '^(TestCompatibilityCgroupTCPRoundTrip|TestSharedRewriteRoundTripIntegration|TestSharedRewriteUDPChecksumDeliveryIntegration)$'
+    run_required .kernel-tests/runtime.test '^(TestCompatibilityCgroup(TCP|UDP)RoundTrip|TestSharedRewriteRoundTripIntegration|TestSharedRewriteUDPChecksumDeliveryIntegration)$'
     ;;
   5.4.*)
     run_required .kernel-tests/core.test '^(TestCompatibilityObjectsIntegration|TestCgroupProgramMatrixIntegration|TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass|TestCgroupUDPRecoverySweep.*|TestSharedPacketRewrite.*Integration|TestMapScanBudgetIntegration|TestRuntimeInspectionUsesOwnerIDs)$'

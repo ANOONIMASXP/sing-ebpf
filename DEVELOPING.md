@@ -359,13 +359,14 @@ commit.
 `Kernel compatibility` builds checksum-pinned 4.19.325, 5.4.290, 5.10.240 and
 6.6.110 kernels with vmtest 0.18.0:
 
-- 4.19 is a restricted profile: cgroup TCP and shared packet-rewrite TCP/UDP,
+- 4.19 is a restricted profile: cgroup and shared packet-rewrite TCP/UDP,
   including IPv4/IPv6 object loads, policy fixtures, real bidirectional traffic,
-  original-destination lookup and teardown. Negative checks require upstream
-  4.19 to reject cgroup UDP recvmsg hooks and socket assignment; this does not
-  impose a version gate on vendor backports.
-- 5.4 additionally requires cgroup UDP (connected and unconnected sockets),
-  its recovery tests, and shared rewrite ICMP/clsact replacement. Both legacy
+  original-destination lookup and teardown. The pinned 4.19.325 stable kernel
+  backports cgroup UDP recvmsg hooks; both connected and unconnected UDP are
+  required. Negative checks reject socket assignment, not UDP. This does not
+  imply that every older 4.19 patch level or vendor kernel has the backport.
+- 5.4 additionally requires cgroup UDP recovery tests and shared rewrite
+  ICMP/clsact replacement. Both legacy
   profiles require packet-rewrite zero-checksum/partial-checksum delivery.
 - 5.10/6.6 run the full namespace suite with optional TCX fallback.
 

@@ -26,7 +26,7 @@ interpreting their own configuration and route rules.
 | --- | --- | --- | --- |
 | local cgroup | object selection, token/original maps, redirect routes, cgroup links, release cleanup | none | listeners, accepted TCP metadata, UDP NAT/session state, UID/package policy |
 | local TC | programs/maps, policy compiler, listeners, assignments, cookie self-bypass | default-interface attachment, delivery veth, policy routing, sysctls, reconciliation | listener/session handling, process metadata, interface events, diagnostics presentation |
-| shared socket assignment | programs/maps, assignments, source policy | downstream attachment, policy routing, reconciliation | listeners, shared-source metadata, TCP/UDP handling |
+| shared socket assignment | programs/maps, assignments, return routes, source policy | downstream attachment, isolated delivery veth, private policy routing, reconciliation | namespace lifetime, listeners, shared-source metadata, TCP/UDP handling |
 | shared packet rewrite | rewrite programs/maps, flow lookup/update and counters | downstream attachment, `route_localnet`, health and rollback | token listeners, userspace flow lifecycle, policy translation, warning presentation |
 
 The consumer may combine one local and one shared choice. A path disabled by
@@ -54,6 +54,7 @@ Each directory under `runtime/` remains part of a complete resource owner:
 - `runtime/tc_reconcile.go`
 - `runtime/tc_netlink.go`
 - `runtime/tc_delivery.go`
+- `runtime/tc_namespace.go` and `runtime/tc_isolated_delivery.go`
 - `runtime/tc_routing.go`
 - `runtime/tc_topology.go`
 - their unit and network-namespace tests
@@ -64,6 +65,23 @@ rollback, and the `TCBackend`. Raw links, filters, qdiscs, routes, sysctl
 records, BPF maps, programs, and file descriptors remain under
 `internal/core`. The separate `runtime` package can borrow backend handles only
 through the module's internal bridge; consumers cannot access or close them.
+
+For isolated delivery, `TCNamespace` is a separate caller-owned lifetime:
+create it before TCP/UDP listeners, pass it to the runtime, then close it after
+the runtime and all listener/reply sockets. It owns an anonymous namespace FD,
+not a named mount or holder process. The runtime owns a cross-namespace veth;
+its routes/rules and delivery sysctls are confined to that namespace. Host
+interface attachment and outbound dialing remain outside it.
+
+`native/tc_isolation.h` preserves IP/port tuples and records a separate return
+route. `internal/core/tc_return.go` owns opaque generation handles and consumer
+references. TCP accept may consume assignment metadata without removing its
+return route. UDP sessions retain primary and reply-alias handles. The bounded
+HASH rejects admission when full, and the shared maintenance entry point skips
+live references while reclaiming idle orphan/closed routes. Releasing the last
+reference does not immediately remove the record: FIN/ACK and in-flight replies
+retain the activity grace. Failed publication, conflicting publishers and
+missing replies have separate native counters.
 
 ### Shared packet-rewrite runtime
 

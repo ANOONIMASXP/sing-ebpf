@@ -53,6 +53,18 @@ metadata), not by the consumer feature.
 
 ## Ordinary Go changes
 
+Namespace socket-assignment changes additionally require
+`TestTCNamespaceLifetimeIntegration`, `TestTCIsolatedVerifierIntegration`,
+`TestTCIsolatedRoundTripIntegration`, `TestTCIsolatedExistingSNATIntegration`
+and `TestTCReturnRouteLifetimeIntegration`. These verify TCP/UDP tuple
+preservation, local/shared delivery, IPv4/IPv6, local raw-IP framing, host port
+conflicts, existing SNAT, large fragmented UDP replies, filter/veth repair and
+pinned return-map capacity.
+SNAT tests need `iptables` only in the test environment; production does not.
+Do not flush the host conntrack table to make a test pass. Keep real-device
+checks separate from namespace test evidence, particularly vendor raw-IP
+interfaces and NIC MTU/offload behavior.
+
 The library is build-tagged for Linux/Android eBPF consumers. Run:
 
 ```sh

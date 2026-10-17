@@ -89,11 +89,13 @@ are identified by their kernel socket cookie. An exclusive process cgroup can
 populate and release the cookie map in kernel hooks. When the cgroup is shared
 or cannot be attached, a consumer can register dialer and transparent-reply
 socket cookies once at creation time.
-Selected packets are addressed to the delivery peer, cross the veth, and are assigned at
-its ingress hook. L3-only links receive an Ethernet header before this redirect.
+For isolated socket assignment, selected packets cross a veth into a private
+network namespace and are assigned at its ingress hook. L3-only links receive
+an Ethernet header before this redirect. TCP and UDP keep their original IP
+addresses and ports; this is not packet/token rewriting.
 
-Shared `socket_assign` traffic is selected and assigned at TC ingress on each
-configured downstream interface. Shared `packet_rewrite` traffic is selected
+Shared `socket_assign` traffic is selected at TC ingress on each configured
+downstream interface and uses the same isolated TCP/UDP delivery. Shared `packet_rewrite` traffic is selected
 and rewritten at ingress, then restored at egress. Local and shared roles can
 be enabled independently, including with local cgroup plus shared
 `packet_rewrite`.
@@ -102,9 +104,34 @@ Local egress and shared `socket_assign` ingress each have Ethernet and raw-IP
 program variants; the selected variant follows the link encapsulation reported
 by netlink. Shared `packet_rewrite` intentionally accepts Ethernet framing
 only because it edits L2 packets in place.
-`classifier/delivery_ingress` always parses Ethernet from the internal veth.
-Local and delivery use the local IPv6 flag; shared uses the shared IPv6 flag.
+Delivery always parses Ethernet from the internal veth. Local and shared
+selection use their own IPv6 flags; isolated delivery accepts either enabled family.
 Both flags are static for the lifetime of the inbound.
+
+Consumers create `runtime.NewTCNamespace` before their transparent listeners,
+use its `Path()` for TCP, UDP and transparent UDP reply sockets, set
+`TCConfig.Isolated`, and pass the namespace to `runtime.NewTCRuntime`.
+Outbound dialers stay in the host namespace. Close the runtime and sockets
+before closing the caller-owned namespace. No named namespace, mount point,
+holder process, host NAT rule, or host-wide sysctl change is needed.
+The low-level non-isolated backend remains available to existing embedders;
+sing-box uses the isolated path for both local TC and shared socket assignment.
+
+The host veth ingress returns replies directly to the recorded original
+interface (ingress for local clients; egress for shared clients), outside host
+NAT. Assignment metadata and return routing have separate lifetimes:
+`sb_tc_assign` is consumable metadata, while `sb_tc_return` is a bounded HASH.
+Consumers retain return handles for live TCP/UDP sessions and reply aliases;
+the maintenance worker cleans only unreferenced idle records. Full capacity
+rejects new flows instead of evicting active return paths. Counters distinguish
+publication failure, competing publishers and missing return records.
+
+The private reply route uses the smallest selected interface MTU. Its IP stack
+segments TCP and, when enabled by the consumer, fragments UDP before direct
+return. A bounded `sb_tc_rfrag` LRU cache carries the first fragment's return
+path to subsequent IPv4/IPv6 fragments for at most two seconds; it cannot evict
+live flow routes. The worker reclaims expired fragment records. A cache miss
+drops the fragment and increments the return-lookup failure counter.
 
 Fragmented IPv4 datagrams and non-atomic IPv6 fragments bypass before policy
 selection. IPv6 atomic fragments continue through extension-header parsing.
@@ -300,8 +327,9 @@ cleanup path.
 For local cgroup mode, the consumer selects redirect prefixes and supplies
 listeners; the backend prepares routes and maps, loads the enabled program set,
 and attaches it last. Shared `packet_rewrite` uses separate listeners and token
-routes. Shared `socket_assign` uses TC listeners and policy routing without a
-delivery veth. Any combination of local and shared choices is valid. Shutdown
+routes. Isolated shared `socket_assign` uses the same namespace listeners,
+bidirectional veth and private policy routing as local TC. Any combination of
+local and shared choices is valid. Shutdown
 detaches each selected backend and removes only routes owned by that instance. A
 disabled path does not load its object or create network state.
 
@@ -316,8 +344,13 @@ release number alone insufficient.
 
 Use a Linux kernel with BPF syscall support, cgroup v2 when the local
 `cgroup` path is enabled, and the TC classifier facilities required by the
-selected path. Local TC additionally needs a usable veth implementation and
-writable policy-routing and interface sysctls. `packet_rewrite` needs Ethernet
+selected path. Isolated local TC and shared socket assignment additionally need
+`CONFIG_NET_NS`, `CONFIG_VETH`, `CAP_SYS_ADMIN` for `unshare`/`setns`, and
+`CAP_NET_ADMIN` for private routes, links and transparent sockets. These
+facilities predate `bpf_sk_assign` and do not raise that path's upstream kernel
+feature floor. Netkit, `bpf_redirect_peer`, TCX and a global BTF are not required.
+Kernels without namespaces can still use cgroup/packet-rewrite paths.
+`packet_rewrite` needs Ethernet
 framing; `socket_assign` can also use the documented raw-IP and tunnel link
 types. Run the probe and service as root or with equivalent capabilities,
 normally `CAP_BPF` and `CAP_NET_ADMIN` (older kernels may also require
@@ -340,7 +373,8 @@ commonly restrict cgroup hooks or TCX independently; runtime fallbacks are
 selected separately. A denied optional socket-release or process-tracking hook
 does not by itself make the main data plane unsupported.
 
-Local TC also needs the vendor kernel's veth, TC, route, and sysctl facilities;
+Isolated local TC and shared socket assignment also need vendor namespace
+creation/reentry permissions (including SELinux), veth, TC, routes and sysctls;
 cgroup-only local interception does not need veth or TC. Shared
 `packet_rewrite` requires an Ethernet-framed downstream interface, while
 `socket_assign` supports the documented L3/raw-IP variants. Validate the exact

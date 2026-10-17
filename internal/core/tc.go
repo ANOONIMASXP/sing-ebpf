@@ -734,6 +734,9 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	if maxIdle <= 0 || fallbackBudget == 0 {
 		return TCAssignmentSweepResult{}, unix.EINVAL
 	}
+	// Native activity writes are coalesced for one second. Never interpret
+	// that intentionally coarse timestamp as proof that an active flow is idle.
+	maxIdle = max(maxIdle, 2*time.Second)
 	b.assignmentSweepAccess.Lock()
 	defer b.assignmentSweepAccess.Unlock()
 	b.access.RLock()

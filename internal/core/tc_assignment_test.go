@@ -209,3 +209,35 @@ func TestSweepAssignmentsRemovesOnlyUnchangedStaleEntries(t *testing.T) {
 		t.Fatal("stale assignment remains in map")
 	}
 }
+func TestSweepAssignmentsPreservesCoalescedActivity(t *testing.T) {
+	backend := newTestAssignmentBackend(t)
+	backend.assignmentCapacity = 64
+	source := netip.MustParseAddrPort("192.0.2.10:53000")
+	destination := netip.MustParseAddrPort("1.1.1.1:53")
+	value := TCAssignment{LastSeenNS: monotonicNowNS() - uint64(time.Second), Generation: 42, InterfaceIndex: 17, Path: TCPathShared}
+	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 17, value)
+	key, err := makeTCAssignKey(ProtocolUDP, destination, source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	returnValue := tcReturnValue{LastSeenNS: value.LastSeenNS, Generation: 42, InterfaceIndex: 17}
+	if err = backend.runtime.maps["tc_return"].Put(key, returnValue); err != nil {
+		t.Fatal(err)
+	}
+
+	// A caller's subsecond timeout must not mistake the native one-second
+	// write coalescing window for inactivity, for either map.
+	result, err := backend.SweepAssignments(time.Nanosecond, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 0 || result.ReturnRemoved != 0 || !result.UsageKnown || !result.ReturnUsageKnown {
+		t.Fatalf("coalesced activity was reclaimed: %+v", result)
+	}
+	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = backend.runtime.maps["tc_return"].Lookup(key, &returnValue); err != nil {
+		t.Fatal(err)
+	}
+}

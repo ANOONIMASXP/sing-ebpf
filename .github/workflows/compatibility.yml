@@ -26,10 +26,10 @@ jobs:
       - name: Install guest and kernel build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-guest-agent ovmf build-essential flex bison libssl-dev libelf-dev bc iptables
+          sudo apt-get install -y qemu-system-x86 qemu-guest-agent ovmf build-essential flex bison libssl-dev libelf-dev bc iptables iproute2
       - name: Cache test kernel
         id: kernel-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ runner.temp }}/test-kernel/bzImage
@@ -38,25 +38,29 @@ jobs:
       - name: Build pinned test kernel
         if: steps.kernel-cache.outputs.cache-hit != 'true'
         run: bash .github/scripts/build-test-kernel.sh ${{ matrix.kernel }} "${{ runner.temp }}/test-kernel"
+      - name: Save compiled test kernel
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ runner.temp }}/test-kernel/bzImage
+            ${{ runner.temp }}/test-kernel/kernel.config
+          key: ${{ steps.kernel-cache.outputs.cache-primary-key }}
       - name: Install pinned VM runner
         run: cargo install vmtest --version 0.18.0 --locked
       - name: Build integration binaries
         run: |
-          mkdir -p .kernel-tests
+          mkdir -p .kernel-tests/bin
+          # The pinned kernels provide built-in legacy NAT. Avoid depending on
+          # the host distribution's nftables default or guest kernel modules.
+          ln -s "$(command -v iptables-legacy)" .kernel-tests/bin/iptables
           CGO_ENABLED=0 go test -c -tags with_ebpf,ebpf_integration -o .kernel-tests/core.test ./internal/core
           CGO_ENABLED=0 go test -c -tags with_ebpf,ebpf_integration -o .kernel-tests/runtime.test ./runtime
       - name: Test selected paths in guest kernel
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ matrix.kernel }}" == 5.4.* ]]; then
-            # sk_assign arrived later. Require actual compatibility-path object
-            # loads; do not count a skipped socket-assignment test as success.
-            command='SING_EBPF_INTEGRATION=1 .kernel-tests/core.test -test.v -test.run "TestCompatibilityObjectsIntegration|TestSharedPacketRewrite.*Integration|TestMapScanBudgetIntegration|TestRuntimeInspectionUsesOwnerIDs"'
-          else
-            command='SING_EBPF_INTEGRATION=1 .kernel-tests/core.test -test.v && SING_EBPF_INTEGRATION=1 .kernel-tests/runtime.test -test.v'
-          fi
-          sudo "$HOME/.cargo/bin/vmtest" -k "${{ runner.temp }}/test-kernel/bzImage" "$command" 2>&1 | tee kernel-test.log
+          sudo "$HOME/.cargo/bin/vmtest" -k "${{ runner.temp }}/test-kernel/bzImage" 'bash .github/scripts/run-kernel-tests.sh' 2>&1 | tee kernel-test.log
       - uses: actions/upload-artifact@v7
         if: always()
         with:

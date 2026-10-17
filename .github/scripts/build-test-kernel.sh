@@ -20,7 +20,7 @@ scripts/config --disable DEBUG_INFO --disable DEBUG_INFO_BTF --disable SECURITY_
   --enable NET_SCHED --enable NET_CLS_BPF --enable NET_CLS_ACT --enable NET_SCH_INGRESS \
   --enable NET_CLS_U32 --enable NET_ACT_BPF --enable NET_ACT_MIRRED \
   --enable NETFILTER --enable NF_CONNTRACK --enable NF_NAT --enable IP_NF_IPTABLES \
-  --enable IP_NF_FILTER --enable IP_NF_NAT --enable IP_NF_TARGET_MASQUERADE \
+  --enable IP_NF_FILTER --enable IP_NF_NAT --enable IP_NF_TARGET_MASQUERADE --enable NETFILTER_XT_NAT \
   --enable IPV6 --enable IP_ADVANCED_ROUTER --enable IP_MULTIPLE_TABLES --enable IPV6_MULTIPLE_TABLES \
   --enable VIRTIO --enable VIRTIO_PCI --enable VIRTIO_CONSOLE --enable VIRTIO_NET \
   --enable NET_9P --enable NET_9P_VIRTIO --enable 9P_FS --enable DEVTMPFS --enable DEVTMPFS_MOUNT

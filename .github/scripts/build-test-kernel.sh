@@ -3,6 +3,7 @@ set -euo pipefail
 version="$1"
 work="$2"
 case "$version" in
+  4.19.325) checksum=607bed7de5cda31a443df4c8a78dbe5e8a9ad31afde2a4d28fe99ab4730e8de1 ;;
   5.4.290) checksum=6cc73cf2a7f50580f7d8c7e99d2f2e8ada8b7d2f4e76f5896f0daf691cc2a456 ;;
   5.10.240) checksum=8d88c3977226d666554b75f480d1e6c5f4e4d2acdf2a3462840c6bac88634d13 ;;
   6.6.110) checksum=1bf20daf5543b8759f325e55fb0da4913715e68741627a13380e66aaf219fb1d ;;

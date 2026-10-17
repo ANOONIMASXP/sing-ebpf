@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kernel: [5.4.290, 5.10.240, 6.6.110]
+        kernel: [4.19.325, 5.4.290, 5.10.240, 6.6.110]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6

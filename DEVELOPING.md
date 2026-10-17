@@ -356,11 +356,23 @@ commit.
 
 ## Compatibility CI and performance evidence
 
-`Kernel compatibility` builds checksum-pinned 5.4.290, 5.10.240 and 6.6.110
-kernels with vmtest 0.18.0. The 5.4 job requires cgroup/packet-rewrite object loads
-and packet fixtures; it excludes socket assignment. Later jobs run the full
-namespace suite with optional TCX fallback. Host tests do not prove these
-guest jobs, OpenWrt firmware or Android vendor kernels passed; check their logs.
+`Kernel compatibility` builds checksum-pinned 4.19.325, 5.4.290, 5.10.240 and
+6.6.110 kernels with vmtest 0.18.0:
+
+- 4.19 is a restricted profile: cgroup TCP and shared packet-rewrite TCP/UDP,
+  including IPv4/IPv6 object loads, policy fixtures, real bidirectional traffic,
+  original-destination lookup and teardown. Negative checks require upstream
+  4.19 to reject cgroup UDP recvmsg hooks and socket assignment; this does not
+  impose a version gate on vendor backports.
+- 5.4 additionally requires cgroup UDP (connected and unconnected sockets),
+  its recovery tests, and shared rewrite ICMP/clsact replacement. Both legacy
+  profiles require packet-rewrite zero-checksum/partial-checksum delivery.
+- 5.10/6.6 run the full namespace suite with optional TCX fallback.
+
+The 4.19/5.4 selections fail on skipped or empty test runs. The IPv4/IPv6 veth
+round-trip fixture uses static neighbors to isolate token rewriting from ARP/NDP
+policy. Host tests do not prove these guest jobs, OpenWrt firmware, physical NIC
+offloads or Android vendor kernels passed; check their logs and device evidence.
 
 Benchmark without concurrent compilation:
 `go test -bench BenchmarkOOBBatchReceive -benchmem ./common/udpio` in sing-box,

@@ -363,6 +363,13 @@ accepted only after its maps, programs, helpers, verifier load, and attachment
 path pass runtime probes; vendor backports and configuration differences make a
 release number alone insufficient.
 
+The compatibility CI includes a restricted upstream 4.19 profile (cgroup TCP
+and shared `packet_rewrite` TCP/UDP), 5.4 compatibility paths and 5.10/6.6 full
+paths. Upstream cgroup UDP reply rewriting requires recvmsg hooks introduced in
+5.2; upstream socket assignment requires `bpf_sk_assign` from 5.7. Thus 4.19 is
+not a full-feature minimum. These are validation targets and feature boundaries,
+not a guarantee for every kernel with the same version; see [DEVELOPING.md](DEVELOPING.md).
+
 ### Standard Linux and OpenWrt
 
 Use a Linux kernel with BPF syscall support, cgroup v2 when the local

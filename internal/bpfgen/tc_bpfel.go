@@ -16,39 +16,51 @@ import (
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	TCMapTcAssignment                           = "tc_assignment"
-	TCMapTcControl                              = "tc_control"
-	TCMapTcExcludeSourceIpv4                    = "tc_exclude_source_ipv4"
-	TCMapTcExcludeSourceIpv6                    = "tc_exclude_source_ipv6"
-	TCMapTcExcludeSourceMac                     = "tc_exclude_source_mac"
-	TCMapTcHostIpv4                             = "tc_host_ipv4"
-	TCMapTcHostIpv6                             = "tc_host_ipv6"
-	TCMapTcIncludeSourceIpv4                    = "tc_include_source_ipv4"
-	TCMapTcIncludeSourceIpv6                    = "tc_include_source_ipv6"
-	TCMapTcIncludeSourceMac                     = "tc_include_source_mac"
-	TCMapTcListenerSockets                      = "tc_listener_sockets"
-	TCMapTcLocalBypassIpv4                      = "tc_local_bypass_ipv4"
-	TCMapTcLocalBypassIpv6                      = "tc_local_bypass_ipv6"
-	TCMapTcLocalBypassPort                      = "tc_local_bypass_port"
-	TCMapTcSelfSockets                          = "tc_self_sockets"
-	TCMapTcSharedBypassIpv4                     = "tc_shared_bypass_ipv4"
-	TCMapTcSharedBypassIpv6                     = "tc_shared_bypass_ipv6"
-	TCMapTcSharedBypassPort                     = "tc_shared_bypass_port"
-	TCMapTcStats                                = "tc_stats"
-	TCMapTcUidPolicy                            = "tc_uid_policy"
-	TCProgSingEbpfTcDeliveryIngress             = "sing_ebpf_tc_delivery_ingress"
-	TCProgSingEbpfTcDeliveryIngressLegacy       = "sing_ebpf_tc_delivery_ingress_legacy"
-	TCProgSingEbpfTcDeliveryIngressUdp          = "sing_ebpf_tc_delivery_ingress_udp"
-	TCProgSingEbpfTcLocalEgressEthernetMark     = "sing_ebpf_tc_local_egress_ethernet_mark"
-	TCProgSingEbpfTcLocalEgressEthernetProcess  = "sing_ebpf_tc_local_egress_ethernet_process"
-	TCProgSingEbpfTcLocalEgressRawIpMark        = "sing_ebpf_tc_local_egress_raw_ip_mark"
-	TCProgSingEbpfTcLocalEgressRawIpProcess     = "sing_ebpf_tc_local_egress_raw_ip_process"
-	TCProgSingEbpfTcSharedIngressEthernet       = "sing_ebpf_tc_shared_ingress_ethernet"
-	TCProgSingEbpfTcSharedIngressEthernetLegacy = "sing_ebpf_tc_shared_ingress_ethernet_legacy"
-	TCProgSingEbpfTcSharedIngressEthernetUdp    = "sing_ebpf_tc_shared_ingress_ethernet_udp"
-	TCProgSingEbpfTcSharedIngressRawIp          = "sing_ebpf_tc_shared_ingress_raw_ip"
-	TCProgSingEbpfTcSharedIngressRawIpLegacy    = "sing_ebpf_tc_shared_ingress_raw_ip_legacy"
-	TCProgSingEbpfTcSharedIngressRawIpUdp       = "sing_ebpf_tc_shared_ingress_raw_ip_udp"
+	TCMapTcAssignment                            = "tc_assignment"
+	TCMapTcControl                               = "tc_control"
+	TCMapTcExcludeSourceIpv4                     = "tc_exclude_source_ipv4"
+	TCMapTcExcludeSourceIpv6                     = "tc_exclude_source_ipv6"
+	TCMapTcExcludeSourceMac                      = "tc_exclude_source_mac"
+	TCMapTcHostIpv4                              = "tc_host_ipv4"
+	TCMapTcHostIpv6                              = "tc_host_ipv6"
+	TCMapTcIncludeSourceIpv4                     = "tc_include_source_ipv4"
+	TCMapTcIncludeSourceIpv6                     = "tc_include_source_ipv6"
+	TCMapTcIncludeSourceMac                      = "tc_include_source_mac"
+	TCMapTcListenerSockets                       = "tc_listener_sockets"
+	TCMapTcLocalBypassIpv4                       = "tc_local_bypass_ipv4"
+	TCMapTcLocalBypassIpv6                       = "tc_local_bypass_ipv6"
+	TCMapTcLocalBypassPort                       = "tc_local_bypass_port"
+	TCMapTcReturn                                = "tc_return"
+	TCMapTcReturnFrag                            = "tc_return_frag"
+	TCMapTcSelfSockets                           = "tc_self_sockets"
+	TCMapTcSharedBypassIpv4                      = "tc_shared_bypass_ipv4"
+	TCMapTcSharedBypassIpv6                      = "tc_shared_bypass_ipv6"
+	TCMapTcSharedBypassPort                      = "tc_shared_bypass_port"
+	TCMapTcStats                                 = "tc_stats"
+	TCMapTcUidPolicy                             = "tc_uid_policy"
+	TCProgSingEbpfTcDeliveryIngress              = "sing_ebpf_tc_delivery_ingress"
+	TCProgSingEbpfTcDeliveryIngressLegacy        = "sing_ebpf_tc_delivery_ingress_legacy"
+	TCProgSingEbpfTcDeliveryIngressUdp           = "sing_ebpf_tc_delivery_ingress_udp"
+	TCProgSingEbpfTcIsolatedDelivery             = "sing_ebpf_tc_isolated_delivery"
+	TCProgSingEbpfTcIsolatedDeliveryLegacy       = "sing_ebpf_tc_isolated_delivery_legacy"
+	TCProgSingEbpfTcIsolatedDeliveryUdp          = "sing_ebpf_tc_isolated_delivery_udp"
+	TCProgSingEbpfTcIsolatedReturn               = "sing_ebpf_tc_isolated_return"
+	TCProgSingEbpfTcLocalEgressEthernetMark      = "sing_ebpf_tc_local_egress_ethernet_mark"
+	TCProgSingEbpfTcLocalEgressEthernetProcess   = "sing_ebpf_tc_local_egress_ethernet_process"
+	TCProgSingEbpfTcLocalEgressRawIpMark         = "sing_ebpf_tc_local_egress_raw_ip_mark"
+	TCProgSingEbpfTcLocalEgressRawIpProcess      = "sing_ebpf_tc_local_egress_raw_ip_process"
+	TCProgSingEbpfTcLocalEthernetIsolated        = "sing_ebpf_tc_local_ethernet_isolated"
+	TCProgSingEbpfTcLocalEthernetIsolatedProcess = "sing_ebpf_tc_local_ethernet_isolated_process"
+	TCProgSingEbpfTcLocalRawIsolated             = "sing_ebpf_tc_local_raw_isolated"
+	TCProgSingEbpfTcLocalRawIsolatedProcess      = "sing_ebpf_tc_local_raw_isolated_process"
+	TCProgSingEbpfTcSharedEthernetIsolated       = "sing_ebpf_tc_shared_ethernet_isolated"
+	TCProgSingEbpfTcSharedIngressEthernet        = "sing_ebpf_tc_shared_ingress_ethernet"
+	TCProgSingEbpfTcSharedIngressEthernetLegacy  = "sing_ebpf_tc_shared_ingress_ethernet_legacy"
+	TCProgSingEbpfTcSharedIngressEthernetUdp     = "sing_ebpf_tc_shared_ingress_ethernet_udp"
+	TCProgSingEbpfTcSharedIngressRawIp           = "sing_ebpf_tc_shared_ingress_raw_ip"
+	TCProgSingEbpfTcSharedIngressRawIpLegacy     = "sing_ebpf_tc_shared_ingress_raw_ip_legacy"
+	TCProgSingEbpfTcSharedIngressRawIpUdp        = "sing_ebpf_tc_shared_ingress_raw_ip_udp"
+	TCProgSingEbpfTcSharedRawIsolated            = "sing_ebpf_tc_shared_raw_isolated"
 )
 
 // LoadTC returns the embedded CollectionSpec for TC.
@@ -93,19 +105,29 @@ type TCSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type TCProgramSpecs struct {
-	SingEbpfTcDeliveryIngress             *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_delivery_ingress"`
-	SingEbpfTcDeliveryIngressLegacy       *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_delivery_ingress_legacy"`
-	SingEbpfTcDeliveryIngressUdp          *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_delivery_ingress_udp"`
-	SingEbpfTcLocalEgressEthernetMark     *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_egress_ethernet_mark"`
-	SingEbpfTcLocalEgressEthernetProcess  *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_egress_ethernet_process"`
-	SingEbpfTcLocalEgressRawIpMark        *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_egress_raw_ip_mark"`
-	SingEbpfTcLocalEgressRawIpProcess     *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_egress_raw_ip_process"`
-	SingEbpfTcSharedIngressEthernet       *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_ethernet"`
-	SingEbpfTcSharedIngressEthernetLegacy *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_ethernet_legacy"`
-	SingEbpfTcSharedIngressEthernetUdp    *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_ethernet_udp"`
-	SingEbpfTcSharedIngressRawIp          *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip"`
-	SingEbpfTcSharedIngressRawIpLegacy    *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip_legacy"`
-	SingEbpfTcSharedIngressRawIpUdp       *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip_udp"`
+	SingEbpfTcDeliveryIngress              *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_delivery_ingress"`
+	SingEbpfTcDeliveryIngressLegacy        *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_delivery_ingress_legacy"`
+	SingEbpfTcDeliveryIngressUdp           *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_delivery_ingress_udp"`
+	SingEbpfTcIsolatedDelivery             *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery"`
+	SingEbpfTcIsolatedDeliveryLegacy       *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_legacy"`
+	SingEbpfTcIsolatedDeliveryUdp          *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_udp"`
+	SingEbpfTcIsolatedReturn               *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_return"`
+	SingEbpfTcLocalEgressEthernetMark      *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_egress_ethernet_mark"`
+	SingEbpfTcLocalEgressEthernetProcess   *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_egress_ethernet_process"`
+	SingEbpfTcLocalEgressRawIpMark         *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_egress_raw_ip_mark"`
+	SingEbpfTcLocalEgressRawIpProcess      *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_egress_raw_ip_process"`
+	SingEbpfTcLocalEthernetIsolated        *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_ethernet_isolated"`
+	SingEbpfTcLocalEthernetIsolatedProcess *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_ethernet_isolated_process"`
+	SingEbpfTcLocalRawIsolated             *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_raw_isolated"`
+	SingEbpfTcLocalRawIsolatedProcess      *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_raw_isolated_process"`
+	SingEbpfTcSharedEthernetIsolated       *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ethernet_isolated"`
+	SingEbpfTcSharedIngressEthernet        *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_ethernet"`
+	SingEbpfTcSharedIngressEthernetLegacy  *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_ethernet_legacy"`
+	SingEbpfTcSharedIngressEthernetUdp     *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_ethernet_udp"`
+	SingEbpfTcSharedIngressRawIp           *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip"`
+	SingEbpfTcSharedIngressRawIpLegacy     *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip_legacy"`
+	SingEbpfTcSharedIngressRawIpUdp        *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip_udp"`
+	SingEbpfTcSharedRawIsolated            *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_shared_raw_isolated"`
 }
 
 // TCMapSpecs contains maps before they are loaded into the kernel.
@@ -126,6 +148,8 @@ type TCMapSpecs struct {
 	TcLocalBypassIpv4   *ebpf.MapSpec `ebpf:"tc_local_bypass_ipv4"`
 	TcLocalBypassIpv6   *ebpf.MapSpec `ebpf:"tc_local_bypass_ipv6"`
 	TcLocalBypassPort   *ebpf.MapSpec `ebpf:"tc_local_bypass_port"`
+	TcReturn            *ebpf.MapSpec `ebpf:"tc_return"`
+	TcReturnFrag        *ebpf.MapSpec `ebpf:"tc_return_frag"`
 	TcSelfSockets       *ebpf.MapSpec `ebpf:"tc_self_sockets"`
 	TcSharedBypassIpv4  *ebpf.MapSpec `ebpf:"tc_shared_bypass_ipv4"`
 	TcSharedBypassIpv6  *ebpf.MapSpec `ebpf:"tc_shared_bypass_ipv6"`
@@ -174,6 +198,8 @@ type TCMaps struct {
 	TcLocalBypassIpv4   *ebpf.Map `ebpf:"tc_local_bypass_ipv4"`
 	TcLocalBypassIpv6   *ebpf.Map `ebpf:"tc_local_bypass_ipv6"`
 	TcLocalBypassPort   *ebpf.Map `ebpf:"tc_local_bypass_port"`
+	TcReturn            *ebpf.Map `ebpf:"tc_return"`
+	TcReturnFrag        *ebpf.Map `ebpf:"tc_return_frag"`
 	TcSelfSockets       *ebpf.Map `ebpf:"tc_self_sockets"`
 	TcSharedBypassIpv4  *ebpf.Map `ebpf:"tc_shared_bypass_ipv4"`
 	TcSharedBypassIpv6  *ebpf.Map `ebpf:"tc_shared_bypass_ipv6"`
@@ -198,6 +224,8 @@ func (m *TCMaps) Close() error {
 		m.TcLocalBypassIpv4,
 		m.TcLocalBypassIpv6,
 		m.TcLocalBypassPort,
+		m.TcReturn,
+		m.TcReturnFrag,
 		m.TcSelfSockets,
 		m.TcSharedBypassIpv4,
 		m.TcSharedBypassIpv6,
@@ -217,19 +245,29 @@ type TCVariables struct {
 //
 // It can be passed to LoadTCObjects or ebpf.CollectionSpec.LoadAndAssign.
 type TCPrograms struct {
-	SingEbpfTcDeliveryIngress             *ebpf.Program `ebpf:"sing_ebpf_tc_delivery_ingress"`
-	SingEbpfTcDeliveryIngressLegacy       *ebpf.Program `ebpf:"sing_ebpf_tc_delivery_ingress_legacy"`
-	SingEbpfTcDeliveryIngressUdp          *ebpf.Program `ebpf:"sing_ebpf_tc_delivery_ingress_udp"`
-	SingEbpfTcLocalEgressEthernetMark     *ebpf.Program `ebpf:"sing_ebpf_tc_local_egress_ethernet_mark"`
-	SingEbpfTcLocalEgressEthernetProcess  *ebpf.Program `ebpf:"sing_ebpf_tc_local_egress_ethernet_process"`
-	SingEbpfTcLocalEgressRawIpMark        *ebpf.Program `ebpf:"sing_ebpf_tc_local_egress_raw_ip_mark"`
-	SingEbpfTcLocalEgressRawIpProcess     *ebpf.Program `ebpf:"sing_ebpf_tc_local_egress_raw_ip_process"`
-	SingEbpfTcSharedIngressEthernet       *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_ethernet"`
-	SingEbpfTcSharedIngressEthernetLegacy *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_ethernet_legacy"`
-	SingEbpfTcSharedIngressEthernetUdp    *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_ethernet_udp"`
-	SingEbpfTcSharedIngressRawIp          *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip"`
-	SingEbpfTcSharedIngressRawIpLegacy    *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip_legacy"`
-	SingEbpfTcSharedIngressRawIpUdp       *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip_udp"`
+	SingEbpfTcDeliveryIngress              *ebpf.Program `ebpf:"sing_ebpf_tc_delivery_ingress"`
+	SingEbpfTcDeliveryIngressLegacy        *ebpf.Program `ebpf:"sing_ebpf_tc_delivery_ingress_legacy"`
+	SingEbpfTcDeliveryIngressUdp           *ebpf.Program `ebpf:"sing_ebpf_tc_delivery_ingress_udp"`
+	SingEbpfTcIsolatedDelivery             *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery"`
+	SingEbpfTcIsolatedDeliveryLegacy       *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_legacy"`
+	SingEbpfTcIsolatedDeliveryUdp          *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_udp"`
+	SingEbpfTcIsolatedReturn               *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_return"`
+	SingEbpfTcLocalEgressEthernetMark      *ebpf.Program `ebpf:"sing_ebpf_tc_local_egress_ethernet_mark"`
+	SingEbpfTcLocalEgressEthernetProcess   *ebpf.Program `ebpf:"sing_ebpf_tc_local_egress_ethernet_process"`
+	SingEbpfTcLocalEgressRawIpMark         *ebpf.Program `ebpf:"sing_ebpf_tc_local_egress_raw_ip_mark"`
+	SingEbpfTcLocalEgressRawIpProcess      *ebpf.Program `ebpf:"sing_ebpf_tc_local_egress_raw_ip_process"`
+	SingEbpfTcLocalEthernetIsolated        *ebpf.Program `ebpf:"sing_ebpf_tc_local_ethernet_isolated"`
+	SingEbpfTcLocalEthernetIsolatedProcess *ebpf.Program `ebpf:"sing_ebpf_tc_local_ethernet_isolated_process"`
+	SingEbpfTcLocalRawIsolated             *ebpf.Program `ebpf:"sing_ebpf_tc_local_raw_isolated"`
+	SingEbpfTcLocalRawIsolatedProcess      *ebpf.Program `ebpf:"sing_ebpf_tc_local_raw_isolated_process"`
+	SingEbpfTcSharedEthernetIsolated       *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ethernet_isolated"`
+	SingEbpfTcSharedIngressEthernet        *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_ethernet"`
+	SingEbpfTcSharedIngressEthernetLegacy  *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_ethernet_legacy"`
+	SingEbpfTcSharedIngressEthernetUdp     *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_ethernet_udp"`
+	SingEbpfTcSharedIngressRawIp           *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip"`
+	SingEbpfTcSharedIngressRawIpLegacy     *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip_legacy"`
+	SingEbpfTcSharedIngressRawIpUdp        *ebpf.Program `ebpf:"sing_ebpf_tc_shared_ingress_raw_ip_udp"`
+	SingEbpfTcSharedRawIsolated            *ebpf.Program `ebpf:"sing_ebpf_tc_shared_raw_isolated"`
 }
 
 func (p *TCPrograms) Close() error {
@@ -237,16 +275,26 @@ func (p *TCPrograms) Close() error {
 		p.SingEbpfTcDeliveryIngress,
 		p.SingEbpfTcDeliveryIngressLegacy,
 		p.SingEbpfTcDeliveryIngressUdp,
+		p.SingEbpfTcIsolatedDelivery,
+		p.SingEbpfTcIsolatedDeliveryLegacy,
+		p.SingEbpfTcIsolatedDeliveryUdp,
+		p.SingEbpfTcIsolatedReturn,
 		p.SingEbpfTcLocalEgressEthernetMark,
 		p.SingEbpfTcLocalEgressEthernetProcess,
 		p.SingEbpfTcLocalEgressRawIpMark,
 		p.SingEbpfTcLocalEgressRawIpProcess,
+		p.SingEbpfTcLocalEthernetIsolated,
+		p.SingEbpfTcLocalEthernetIsolatedProcess,
+		p.SingEbpfTcLocalRawIsolated,
+		p.SingEbpfTcLocalRawIsolatedProcess,
+		p.SingEbpfTcSharedEthernetIsolated,
 		p.SingEbpfTcSharedIngressEthernet,
 		p.SingEbpfTcSharedIngressEthernetLegacy,
 		p.SingEbpfTcSharedIngressEthernetUdp,
 		p.SingEbpfTcSharedIngressRawIp,
 		p.SingEbpfTcSharedIngressRawIpLegacy,
 		p.SingEbpfTcSharedIngressRawIpUdp,
+		p.SingEbpfTcSharedRawIsolated,
 	)
 }
 

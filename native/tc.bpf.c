@@ -80,7 +80,10 @@
 #define SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE 2U
 #define SB_TC_STAT_LOCAL_FRAGMENT_PASS 3U
 #define SB_TC_STAT_SHARED_FRAGMENT_PASS 4U
-#define SB_TC_STAT_COUNT 5U
+#define SB_TC_STAT_RETURN_UPDATE_FAILURE 5U
+#define SB_TC_STAT_RETURN_CONFLICT 6U
+#define SB_TC_STAT_RETURN_LOOKUP_FAILURE 7U
+#define SB_TC_STAT_COUNT 8U
 
 struct sb_tc_control {
     __u32 enabled;
@@ -508,20 +511,32 @@ INLINE bool parse_ethernet(void *data, void *data_end, __u16 *protocol, __u32 *l
     return true;
 }
 
+// Fragment parsing is enabled only for replies generated in our private netns.
+// External fragments continue to follow the existing pass-through policy.
+struct sb_tc_fragment { __u32 id; __u32 state; }; // 0=whole, 1=first, 2=tail
+
 INLINE bool fill_ipv4_key(void *data, void *data_end, __u32 l3_offset,
-    const struct sb_tc_control *control, struct sb_tc_assign_key *key, __u32 fragment_stat) {
+    const struct sb_tc_control *control, struct sb_tc_assign_key *key, __u32 fragment_stat,
+    struct sb_tc_fragment *fragment) {
     struct ipv4_header *ip = data + l3_offset;
     if ((void *)(ip + 1) > data_end || ip->version != 4U || ip->ihl < 5U ||
         !protocol_enabled(control, ip->protocol)) return false;
     if ((network_order16(ip->fragment_offset) & (IPV4_FRAGMENT_OFFSET_MASK | IPV4_FRAGMENT_MORE)) != 0U) {
-        increment_stat(fragment_stat);
-        return false;
+        if (fragment == 0) {
+            increment_stat(fragment_stat);
+            return false;
+        }
+        fragment->id = network_order16(ip->id);
+        fragment->state = (network_order16(ip->fragment_offset) & IPV4_FRAGMENT_OFFSET_MASK) != 0U ? 2U : 1U;
     }
     __u32 header_length = (__u32)ip->ihl * 4U;
     struct transport_ports *ports = (void *)ip + header_length;
-    if ((void *)(ports + 1) > data_end) return false;
-    __u16 source_port = network_order16(ports->source);
-    __u16 destination_port = network_order16(ports->destination);
+    __u16 source_port = 0U, destination_port = 0U;
+    if (fragment == 0 || fragment->state != 2U) {
+        if ((void *)(ports + 1) > data_end) return false;
+        source_port = network_order16(ports->source);
+        destination_port = network_order16(ports->destination);
+    }
     if (service_port(ip->protocol, source_port, destination_port)) return false;
     __u8 destination[4];
     __builtin_memcpy(destination, &ip->destination, 4U);
@@ -537,7 +552,8 @@ INLINE bool fill_ipv4_key(void *data, void *data_end, __u32 l3_offset,
 }
 
 INLINE bool fill_ipv6_key(void *data, void *data_end, __u32 l3_offset,
-    const struct sb_tc_control *control, struct sb_tc_assign_key *key, __u32 fragment_stat) {
+    const struct sb_tc_control *control, struct sb_tc_assign_key *key, __u32 fragment_stat,
+    struct sb_tc_fragment *fragment_info) {
     struct ipv6_header *ip = data + l3_offset;
     if ((void *)(ip + 1) > data_end || (network_order32(ip->version_flow) >> 28U) != 6U) return false;
     __u8 protocol = ip->next_header;
@@ -549,8 +565,12 @@ INLINE bool fill_ipv6_key(void *data, void *data_end, __u32 l3_offset,
             if ((void *)(fragment + 1) > data_end) return false;
             if ((network_order16(fragment->offset_flags) &
                     (IPV6_FRAGMENT_OFFSET_MASK | IPV6_FRAGMENT_MORE)) != 0U) {
-                increment_stat(fragment_stat);
-                return false;
+                if (fragment_info == 0 || !protocol_enabled(control, fragment->next_header)) {
+                    increment_stat(fragment_stat);
+                    return false;
+                }
+                fragment_info->id = network_order32(fragment->identification);
+                fragment_info->state = (network_order16(fragment->offset_flags) & IPV6_FRAGMENT_OFFSET_MASK) != 0U ? 2U : 1U;
             }
             protocol = fragment->next_header;
             transport_offset += sizeof(*fragment);
@@ -569,9 +589,12 @@ INLINE bool fill_ipv6_key(void *data, void *data_end, __u32 l3_offset,
     }
     if (!protocol_enabled(control, protocol)) return false;
     struct transport_ports *ports = data + transport_offset;
-    if ((void *)(ports + 1) > data_end) return false;
-    __u16 source_port = network_order16(ports->source);
-    __u16 destination_port = network_order16(ports->destination);
+    __u16 source_port = 0U, destination_port = 0U;
+    if (fragment_info == 0 || fragment_info->state != 2U) {
+        if ((void *)(ports + 1) > data_end) return false;
+        source_port = network_order16(ports->source);
+        destination_port = network_order16(ports->destination);
+    }
     if (service_port(protocol, source_port, destination_port) ||
         sb_ebpf_ipv6_safety_bypass(ip->destination)) return false;
     __builtin_memset(key, 0, sizeof(*key));
@@ -598,10 +621,10 @@ INLINE bool parse_flow(struct __sk_buff *skb, const struct sb_tc_control *contro
         __builtin_memset(source_mac, 0, 6U);
     }
     if (ether_type == ETH_P_IP_VALUE && (control->flags & SB_TC_FLAG_IPV4) != 0U) {
-        return fill_ipv4_key(data, data_end, l3_offset, control, key, fragment_stat);
+        return fill_ipv4_key(data, data_end, l3_offset, control, key, fragment_stat, 0);
     }
     if (ether_type == ETH_P_IPV6_VALUE && (control->flags & ipv6_flag) != 0U) {
-        return fill_ipv6_key(data, data_end, l3_offset, control, key, fragment_stat);
+        return fill_ipv6_key(data, data_end, l3_offset, control, key, fragment_stat, 0);
     }
     return false;
 }
@@ -846,7 +869,9 @@ INLINE int redirect_local(struct __sk_buff *skb, const struct sb_tc_control *con
     return redirect((int)control->delivery_ifindex, 0U);
 }
 
-INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_process) {
+#include "tc_isolation.h"
+
+INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_process, bool isolated) {
     const struct sb_tc_control *control = load_control();
     if (control == 0 || control->enabled == 0U || control->delivery_ifindex == 0U) return TC_ACT_UNSPEC;
     if (skb->ingress_ifindex != 0U) return TC_ACT_UNSPEC;
@@ -858,29 +883,58 @@ INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_pr
     if (!parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6, ethernet, &key, source_mac,
             SB_TC_STAT_LOCAL_FRAGMENT_PASS)) return TC_ACT_UNSPEC;
     if (!local_selected(skb, control, &key, socket_metadata_value)) return TC_ACT_UNSPEC;
+    if (isolated) return redirect_isolated(skb, control, &key, track_process ? socket_cookie : 0U,
+        SB_TC_PATH_DELIVERY | (ethernet ? SB_TC_RETURN_ETHERNET : 0U));
     if (track_process) record_local_socket_cookie(&key, socket_cookie);
     return redirect_local(skb, control, ethernet);
 }
 
 SEC("classifier/local_egress_ethernet_mark")
 int sing_ebpf_tc_local_egress_ethernet_mark(struct __sk_buff *skb) {
-	return local_egress_mark(skb, true, false);
+	return local_egress_mark(skb, true, false, false);
 }
 
 SEC("classifier/local_egress_raw_ip_mark")
 int sing_ebpf_tc_local_egress_raw_ip_mark(struct __sk_buff *skb) {
-	return local_egress_mark(skb, false, false);
+	return local_egress_mark(skb, false, false, false);
 }
 
 SEC("classifier/local_egress_ethernet_process")
 int sing_ebpf_tc_local_egress_ethernet_process(struct __sk_buff *skb) {
-	return local_egress_mark(skb, true, true);
+	return local_egress_mark(skb, true, true, false);
 }
 
 SEC("classifier/local_egress_raw_ip_process")
 int sing_ebpf_tc_local_egress_raw_ip_process(struct __sk_buff *skb) {
-	return local_egress_mark(skb, false, true);
+	return local_egress_mark(skb, false, true, false);
 }
+
+SEC("classifier/local_egress_ethernet_isolated")
+int sing_ebpf_tc_local_ethernet_isolated(struct __sk_buff *skb) { return local_egress_mark(skb, true, false, true); }
+SEC("classifier/local_egress_raw_ip_isolated")
+int sing_ebpf_tc_local_raw_isolated(struct __sk_buff *skb) { return local_egress_mark(skb, false, false, true); }
+SEC("classifier/local_egress_ethernet_isolated_process")
+int sing_ebpf_tc_local_ethernet_isolated_process(struct __sk_buff *skb) { return local_egress_mark(skb, true, true, true); }
+SEC("classifier/local_egress_raw_ip_isolated_process")
+int sing_ebpf_tc_local_raw_isolated_process(struct __sk_buff *skb) { return local_egress_mark(skb, false, true, true); }
+
+INLINE int shared_isolated(struct __sk_buff *skb, bool ethernet) {
+    const struct sb_tc_control *control = load_control();
+    if (control == 0 || control->enabled == 0U || control->delivery_ifindex == 0U) return TC_ACT_UNSPEC;
+    struct sb_tc_assign_key key;
+    __u8 source_mac[6];
+    if (!parse_flow(skb, control, SB_TC_FLAG_SHARED_IPV6, ethernet, &key, source_mac,
+            SB_TC_STAT_SHARED_FRAGMENT_PASS)) return TC_ACT_UNSPEC;
+    if (!ethernet && (control->flags & (SB_TC_FLAG_INCLUDE_SOURCE_MAC | SB_TC_FLAG_EXCLUDE_SOURCE_MAC)) != 0U)
+        return TC_ACT_UNSPEC;
+    if (!shared_selected(control, &key, source_mac)) return TC_ACT_UNSPEC;
+    return redirect_isolated(skb, control, &key, 0U,
+        SB_TC_PATH_SHARED | (ethernet ? SB_TC_RETURN_ETHERNET : 0U));
+}
+SEC("classifier/shared_ingress_ethernet_isolated")
+int sing_ebpf_tc_shared_ethernet_isolated(struct __sk_buff *skb) { return shared_isolated(skb, true); }
+SEC("classifier/shared_ingress_raw_ip_isolated")
+int sing_ebpf_tc_shared_raw_isolated(struct __sk_buff *skb) { return shared_isolated(skb, false); }
 
 INLINE int shared_ingress(struct __sk_buff *skb, bool ethernet) {
     const struct sb_tc_control *control = load_control();

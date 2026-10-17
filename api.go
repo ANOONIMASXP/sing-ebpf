@@ -32,6 +32,7 @@ type (
 	SharedPacketRewriteFlowHandle  = core.SharedPacketRewriteFlowHandle
 	SharedPacketRewriteSweepResult = core.SharedPacketRewriteSweepResult
 	TCAssignment                   = core.TCAssignment
+	TCReturnHandle                 = core.TCReturnHandle
 	TCAssignmentSweepResult        = core.TCAssignmentSweepResult
 	TCStats                        = core.TCStats
 	TCLinkFraming                  = core.TCLinkFraming
@@ -231,6 +232,9 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 }
 
 type TCConfig struct {
+	// Isolated preserves TCP/UDP tuples using a private listener namespace.
+	// Pass the same namespace to runtime.NewTCRuntime and all listener factories.
+	Isolated           bool
 	ListenerPort       uint16
 	EnableLocal        bool
 	EnableShared       bool
@@ -254,6 +258,7 @@ type TCBackend struct {
 
 func PrepareTC(config TCConfig) (*TCBackend, error) {
 	backend, err := core.PrepareTCWithSelfBypass(core.TCConfig{
+		Isolated:           config.Isolated,
 		ListenerPort:       config.ListenerPort,
 		EnableLocal:        config.EnableLocal,
 		EnableShared:       config.EnableShared,
@@ -288,6 +293,18 @@ func (b *TCBackend) RegisterTCPListener(ipv6 bool, fd int) error {
 
 func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.AddrPort, interfaceIndex uint32, remove bool) (TCAssignment, error) {
 	return core.UnwrapTCBackend(b).LookupAssignment(protocol, source, destination, interfaceIndex, remove)
+}
+
+func (b *TCBackend) AcquireReturnRoute(protocol uint8, source, destination netip.AddrPort) (TCReturnHandle, error) {
+	return core.UnwrapTCBackend(b).AcquireReturnRoute(protocol, source, destination)
+}
+
+func (b *TCBackend) AcquireReplyRoute(original TCReturnHandle, source netip.AddrPort) (TCReturnHandle, error) {
+	return core.UnwrapTCBackend(b).AcquireReplyRoute(original, source)
+}
+
+func (b *TCBackend) ReleaseReturnRoute(handle TCReturnHandle) {
+	core.UnwrapTCBackend(b).ReleaseReturnRoute(handle)
 }
 
 func (b *TCBackend) RemoveAssignmentIfMatch(protocol uint8, source, destination netip.AddrPort, interfaceIndex uint32, expected TCAssignment) (bool, error) {

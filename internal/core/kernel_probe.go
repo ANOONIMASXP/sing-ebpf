@@ -37,9 +37,9 @@ func probeCommonCapabilities(report *KernelProbeReport, memlockErr error, plan k
 		probeMapType(report, "common", KernelProbeRequired, CiliumEBPF.LPMTrie,
 			"Stores UID, source CIDR, and destination bypass policies.")
 	}
-	if needPacketRewrite {
+	if needPacketRewrite || needSocketAssignment {
 		probeMapType(report, "shared", KernelProbeRequired, CiliumEBPF.PerCPUArray,
-			"Provides per-CPU packet-rewrite scratch and counters.")
+			"Provides per-CPU TC counters and packet-rewrite scratch.")
 	}
 	if plan.enableTCP && needSocketAssignment {
 		probeMapType(report, "common", KernelProbePerformance, CiliumEBPF.SockMap,
@@ -84,6 +84,7 @@ func probeCommonCapabilities(report *KernelProbeReport, memlockErr error, plan k
 			detail string
 		}{
 			{asm.FnSkbPullData, "bpf_skb_pull_data", "Ensures packet headers are linear before tuple rewriting."},
+			{asm.FnSkbLoadBytes, "bpf_skb_load_bytes", "Reads UDP checksums without assuming linear packet data."},
 			{asm.FnCsumDiff, "bpf_csum_diff", "Recomputes checksums after packet tuple rewriting."},
 			{asm.FnL3CsumReplace, "bpf_l3_csum_replace", "Updates IPv4 checksums after packet tuple rewriting."},
 			{asm.FnL4CsumReplace, "bpf_l4_csum_replace", "Updates transport checksums after packet tuple rewriting."},
@@ -92,6 +93,31 @@ func probeCommonCapabilities(report *KernelProbeReport, memlockErr error, plan k
 		} {
 			helpers = append(helpers, helper)
 		}
+	}
+	if needSocketAssignment {
+		for _, helper := range []struct {
+			fn           asm.BuiltinFunc
+			name, detail string
+		}{
+			{asm.FnRedirect, "bpf_redirect", "Transfers original tuples across the private veth and back to their original interface."},
+			{asm.FnSkbStoreBytes, "bpf_skb_store_bytes", "Updates Ethernet framing only; socket-assignment IP addresses and ports remain unchanged."},
+			{asm.FnSkbChangeHead, "bpf_skb_change_head", "Adds delivery Ethernet framing for raw-IP interfaces."},
+			{asm.FnSkbChangeType, "bpf_skb_change_type", "Marks isolated delivery and return packets as PACKET_HOST."},
+			{asm.FnKtimeGetNs, "bpf_ktime_get_ns", "Timestamps TC assignment and independently retained return-route state."},
+		} {
+			found := false
+			for _, existing := range helpers {
+				if existing.fn == helper.fn {
+					found = true
+					break
+				}
+			}
+			if !found {
+				helpers = append(helpers, helper)
+			}
+		}
+		report.Add(KernelProbeWarn, "common", KernelProbeRequired, "TC namespace isolation",
+			"Socket assignment needs CONFIG_NET_NS, CONFIG_VETH, CAP_SYS_ADMIN for unshare/setns, and CAP_NET_ADMIN for veth/routes/transparent sockets. Creation and reentry are verified at startup; no netkit, redirect_peer or TCX requirement is added.")
 	}
 	if needCgroup && plan.enableUDP {
 		probeProgramHelper(report, "local", KernelProbePerformance, CiliumEBPF.CGroupSockAddr,
@@ -174,11 +200,7 @@ func probeCommonCapabilities(report *KernelProbeReport, memlockErr error, plan k
 			fn     asm.BuiltinFunc
 			name   string
 			detail string
-		}{asm.FnGetSocketUid, "bpf_get_socket_uid", "Applies configured local UID or Android package policy."}, struct {
-			fn     asm.BuiltinFunc
-			name   string
-			detail string
-		}{asm.FnSkbChangeHead, "bpf_skb_change_head", "Adds Ethernet framing when the local interface carries raw IP."})
+		}{asm.FnGetSocketUid, "bpf_get_socket_uid", "Applies configured local UID or Android package policy."})
 	}
 	if needTCProgram {
 		for _, helper := range helpers {

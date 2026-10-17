@@ -11,4 +11,4 @@ require (
 	golang.org/x/sys v0.47.0
 )
 
-require github.com/vishvananda/netns v0.0.0-20211101163701-50045581ed74 // indirect
+require github.com/vishvananda/netns v0.0.0-20211101163701-50045581ed74

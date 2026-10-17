@@ -47,11 +47,18 @@ func (d *tcDataPlane) healthCheck(
 			return false, checkErr
 		}
 	}
-	routingHealthy, err := d.routing.healthy()
+	var routingHealthy bool
+	err = d.inNamespace(func() error { var err error; routingHealthy, err = d.routing.healthy(); return err })
 	if err != nil || !routingHealthy {
 		return false, err
 	}
 	if d.delivery != nil {
+		if d.namespace != nil {
+			mtu, mtuErr := d.isolatedReplyMTU(localInterface, sharedInterfaces)
+			if mtuErr != nil || mtu != d.delivery.replyMTU {
+				return false, mtuErr
+			}
+		}
 		deliveryHealthy, checkErr := d.delivery.healthy(d.priority)
 		if checkErr != nil || !deliveryHealthy {
 			return false, checkErr
@@ -114,6 +121,9 @@ func (r *tcPolicyRouting) healthy() (bool, error) {
 }
 
 func (d *tcDeliveryLink) healthy(priority uint16) (bool, error) {
+	if d != nil && d.namespace != nil {
+		return d.healthyIsolated(priority)
+	}
 	if d == nil || d.redirect == nil || d.delivery == nil || d.filter == nil {
 		return false, nil
 	}

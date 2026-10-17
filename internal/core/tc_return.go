@@ -1,0 +1,226 @@
+//go:build with_ebpf && (linux || android)
+
+package core
+
+import (
+	"errors"
+	"net/netip"
+	"time"
+
+	CiliumEBPF "github.com/cilium/ebpf"
+	E "github.com/sagernet/sing/common/exceptions"
+	"golang.org/x/sys/unix"
+)
+
+type tcReturnValue struct {
+	LastSeenNS     uint64
+	Generation     uint64
+	InterfaceIndex uint32
+	Flags          uint32
+	SourceMAC      MACAddress
+	DestinationMAC MACAddress
+	Reserved       uint32
+}
+
+type tcReturnReference struct {
+	key        tcAssignKey
+	generation uint64
+}
+
+// TCReturnHandle pins a tuple-preserving return route for one consumer. Every
+// successful acquire must be released once, after the consumer stops writing.
+// It is opaque and cannot be shared between backends or reconstructed by callers.
+type TCReturnHandle struct {
+	reference tcReturnReference
+	owner     *TCBackend
+}
+
+func (h TCReturnHandle) IsValid() bool { return h.owner != nil && h.reference.generation != 0 }
+func (h TCReturnHandle) Release() {
+	if h.owner != nil {
+		h.owner.ReleaseReturnRoute(h)
+	}
+}
+
+func (b *TCBackend) retainReturnRouteLocked(key tcAssignKey, value tcReturnValue) TCReturnHandle {
+	if b.returnReferences == nil {
+		b.returnReferences = make(map[tcReturnReference]uint32)
+	}
+	ref := tcReturnReference{key: key, generation: value.Generation}
+	b.returnReferences[ref]++
+	return TCReturnHandle{reference: ref, owner: b}
+}
+
+func (b *TCBackend) AcquireReturnRoute(protocol uint8, source, destination netip.AddrPort) (TCReturnHandle, error) {
+	if b == nil {
+		return TCReturnHandle{}, errBackendClosed
+	}
+	key, err := makeTCAssignKey(protocol, destination, source, 0)
+	if err != nil {
+		return TCReturnHandle{}, err
+	}
+	b.access.RLock()
+	defer b.access.RUnlock()
+	if b.runtime == nil || b.runtime.maps["tc_return"] == nil {
+		return TCReturnHandle{}, errBackendClosed
+	}
+	b.returnAccess.Lock()
+	defer b.returnAccess.Unlock()
+	var value tcReturnValue
+	if err = b.runtime.maps["tc_return"].Lookup(&key, &value); err != nil {
+		return TCReturnHandle{}, err
+	}
+	if value.Generation == 0 {
+		return TCReturnHandle{}, E.New("invalid TC return generation")
+	}
+	return b.retainReturnRouteLocked(key, value), nil
+}
+
+// AcquireReplyRoute allows a UDP consumer to reply from a different endpoint
+// without changing a packet tuple (e.g. a DNS response selected by its router).
+// The alias inherits only the already-pinned client's return path.
+func (b *TCBackend) AcquireReplyRoute(original TCReturnHandle, source netip.AddrPort) (TCReturnHandle, error) {
+	if b == nil {
+		return TCReturnHandle{}, errBackendClosed
+	}
+	b.access.RLock()
+	defer b.access.RUnlock()
+	if b.runtime == nil || b.runtime.maps["tc_return"] == nil {
+		return TCReturnHandle{}, errBackendClosed
+	}
+	b.returnAccess.Lock()
+	defer b.returnAccess.Unlock()
+	ref := original.reference
+	if original.owner != b || ref.key.Protocol != ProtocolUDP || b.returnReferences[ref] == 0 {
+		return TCReturnHandle{}, E.New("TC return route is not retained")
+	}
+	client := netip.AddrFrom16(ref.key.DestinationAddress)
+	if ref.key.Family == unix.AF_INET {
+		client = netip.AddrFrom4([4]byte(ref.key.DestinationAddress[:4]))
+	}
+	key, err := makeTCAssignKey(ProtocolUDP, source, netip.AddrPortFrom(client, ref.key.DestinationPort), 0)
+	if err != nil {
+		return TCReturnHandle{}, err
+	}
+	returnMap := b.runtime.maps["tc_return"]
+	var value tcReturnValue
+	if err = returnMap.Lookup(&ref.key, &value); err != nil {
+		return TCReturnHandle{}, err
+	}
+	if value.Generation != ref.generation {
+		return TCReturnHandle{}, E.New("TC return route generation changed")
+	}
+	value.LastSeenNS = monotonicNowNS()
+	value.Generation = value.LastSeenNS
+	if err = returnMap.Update(&key, &value, CiliumEBPF.UpdateNoExist); err != nil && !errors.Is(err, unix.EEXIST) {
+		return TCReturnHandle{}, err
+	}
+	var current tcReturnValue
+	if err = returnMap.Lookup(&key, &current); err != nil {
+		return TCReturnHandle{}, err
+	}
+	if current.InterfaceIndex != value.InterfaceIndex || current.Flags != value.Flags || current.SourceMAC != value.SourceMAC || current.DestinationMAC != value.DestinationMAC {
+		return TCReturnHandle{}, E.New("TC reply route belongs to another publisher")
+	}
+	return b.retainReturnRouteLocked(key, current), nil
+}
+
+func (b *TCBackend) ReleaseReturnRoute(handle TCReturnHandle) {
+	if b == nil || handle.owner != b || !handle.IsValid() {
+		return
+	}
+	b.returnAccess.Lock()
+	defer b.returnAccess.Unlock()
+	ref := handle.reference
+	if count := b.returnReferences[ref]; count > 1 {
+		b.returnReferences[ref] = count - 1
+	} else {
+		delete(b.returnReferences, ref)
+	}
+	// Keep the kernel record through FIN/ACK and delayed UDP replies. The
+	// janitor reclaims it only after the activity grace, never on last release.
+}
+
+// Caller holds b.access. The reference lock serializes acquisition with idle
+// cleanup, so a live consumer cannot lose its route to a maintenance pass.
+func (b *TCBackend) sweepReturnRoutesLocked(maxIdle time.Duration, budget uint32, result *TCAssignmentSweepResult) error {
+	b.returnAccess.Lock()
+	defer b.returnAccess.Unlock()
+	returnMap := b.runtime.maps["tc_return"]
+	if returnMap == nil {
+		return errBackendClosed
+	}
+	now := monotonicNowNS()
+	staleBefore := now - min(now, uint64(maxIdle))
+	type candidate struct {
+		key   tcAssignKey
+		value tcReturnValue
+	}
+	var candidates []candidate
+	scan, err := b.returnSweepScratch.scan(returnMap, b.assignmentCapacity, budget, func(key tcAssignKey, value tcReturnValue) {
+		if value.LastSeenNS != 0 && value.LastSeenNS <= staleBefore && b.returnReferences[tcReturnReference{key, value.Generation}] == 0 {
+			candidates = append(candidates, candidate{key, value})
+		}
+	})
+	if err != nil {
+		result.Failure = TCAssignmentSweepFailureScan
+		return err
+	}
+	result.ReturnScanned = scan.Scanned
+	result.Complete = result.Complete && scan.Complete
+	for _, entry := range candidates {
+		var current tcReturnValue
+		if err = returnMap.Lookup(&entry.key, &current); errors.Is(err, unix.ENOENT) {
+			continue
+		} else if err != nil {
+			result.Failure = TCAssignmentSweepFailureLookup
+			return err
+		}
+		if current != entry.value {
+			continue
+		}
+		if err = returnMap.Delete(&entry.key); err != nil && !errors.Is(err, unix.ENOENT) {
+			result.Failure = TCAssignmentSweepFailureDelete
+			return err
+		}
+		result.ReturnRemoved++
+	}
+	if scan.Complete {
+		result.ReturnUsageKnown = true
+		result.ReturnUsage = MapUsage{Capacity: b.assignmentCapacity, Entries: scan.Entries - min(scan.Entries, result.ReturnRemoved)}
+		result.Pressure = result.Pressure || uint64(result.ReturnUsage.Entries)*100 >= uint64(result.ReturnUsage.Capacity)*70
+	}
+	// An incomplete return scan cannot establish the low-water exit condition.
+	result.UsageKnown = result.UsageKnown && result.ReturnUsageKnown
+	// Fragment cache entries have a fixed short lifetime and no userspace
+	// readers. Reclaim expired entries without touching live flow references.
+	if fragmentMap := b.runtime.maps["tc_return_frag"]; fragmentMap != nil {
+		candidates = candidates[:0]
+		scan, err = b.returnFragmentSweepScratch.scan(fragmentMap, min(b.assignmentCapacity, 1024), budget, func(key tcAssignKey, value tcReturnValue) {
+			if now > value.LastSeenNS && now-value.LastSeenNS > uint64(2*time.Second) {
+				candidates = append(candidates, candidate{key, value})
+			}
+		})
+		if err != nil {
+			result.Failure = TCAssignmentSweepFailureScan
+			return err
+		}
+		result.Complete = result.Complete && scan.Complete
+		for _, entry := range candidates {
+			var current tcReturnValue
+			if err = fragmentMap.Lookup(&entry.key, &current); errors.Is(err, unix.ENOENT) {
+				continue
+			} else if err != nil {
+				result.Failure = TCAssignmentSweepFailureLookup
+				return err
+			}
+			if current == entry.value {
+				if err = fragmentMap.Delete(&entry.key); err != nil && !errors.Is(err, unix.ENOENT) {
+					result.Failure = TCAssignmentSweepFailureDelete
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}

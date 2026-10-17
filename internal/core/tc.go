@@ -22,6 +22,7 @@ const (
 	tcProgramSharedIngressEthernet
 	tcProgramSharedIngressRawIP
 	tcProgramDeliveryIngress
+	tcProgramIsolatedReturn
 	tcProgramCount
 )
 
@@ -40,6 +41,9 @@ const (
 	tcStatAssignmentUpdateFailure
 	tcStatLocalFragmentPass
 	tcStatSharedFragmentPass
+	tcStatReturnUpdateFailure
+	tcStatReturnConflict
+	tcStatReturnLookupFailure
 	tcStatCount
 )
 
@@ -52,6 +56,9 @@ type TCStats struct {
 	AssignmentUpdateFailures uint64
 	LocalFragmentPasses      uint64
 	SharedFragmentPasses     uint64
+	ReturnUpdateFailures     uint64
+	ReturnConflicts          uint64
+	ReturnLookupFailures     uint64
 }
 
 // DefaultTCRoutingMark is used only by standalone backend tests and callers
@@ -85,6 +92,9 @@ const (
 )
 
 type TCConfig struct {
+	// Isolated selects the tuple-preserving namespace delivery and return path.
+	// The caller must provide listeners in that namespace and attach both ends.
+	Isolated           bool
 	ListenerPort       uint16
 	EnableLocal        bool
 	EnableShared       bool
@@ -160,10 +170,14 @@ type TCAssignment struct {
 // observation, and exceeded maxIdle. Unobserved kernel entries remain under
 // the LRU safety net because userspace cannot prove their age.
 type TCAssignmentSweepResult struct {
-	Usage    MapUsage
-	Scanned  uint32
-	Removed  uint32
-	Complete bool
+	ReturnUsage      MapUsage
+	ReturnUsageKnown bool
+	ReturnScanned    uint32
+	ReturnRemoved    uint32
+	Usage            MapUsage
+	Scanned          uint32
+	Removed          uint32
+	Complete         bool
 	// UsageKnown is true only after a complete traversal. A bounded partial
 	// traversal must not be interpreted as an empty map by callers.
 	UsageKnown bool
@@ -214,7 +228,12 @@ type TCBackend struct {
 	// tc_icmp_echo_reply.go. It is a standalone backend (ICMPEchoReplyBackend) rather
 	// than fields inline here because shared.data_plane: packet_rewrite hosts
 	// the same native object with no TCBackend of its own to hold it in.
-	icmpEchoReply *ICMPEchoReplyBackend
+	icmpEchoReply              *ICMPEchoReplyBackend
+	isolated                   bool
+	returnAccess               sync.Mutex
+	returnReferences           map[tcReturnReference]uint32
+	returnSweepScratch         mapScanScratch[tcAssignKey, tcReturnValue]
+	returnFragmentSweepScratch mapScanScratch[tcAssignKey, tcReturnValue]
 }
 
 func PrepareTC(config TCConfig) (*TCBackend, error) {
@@ -289,6 +308,10 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		}
 	}
 	legacyTCP := forceLegacyTCP || !config.EnableTCP
+	if config.Isolated {
+		mapOverrides["tc_return"] = mapSpecOverride{name: "sb_tc_return", mapType: CiliumEBPF.Hash, maxEntries: config.AssignmentCapacity}
+		mapOverrides["tc_return_frag"] = mapSpecOverride{name: "sb_tc_rfrag", mapType: CiliumEBPF.LRUHash, maxEntries: min(config.AssignmentCapacity, 1024)}
+	}
 	maps, loadedPrograms, err := loadTCResources(config, mapOverrides, legacyTCP)
 	if err != nil && config.EnableTCP && !forceLegacyTCP {
 		legacyTCP = true
@@ -345,6 +368,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		control:            controlValue,
 		controlMapFD:       maps["tc_control"].FD(),
 		assignmentMapFD:    maps["tc_assignment"].FD(),
+		isolated:           config.Isolated,
 		assignmentCapacity: config.AssignmentCapacity,
 		selfMapExternal:    config.EnableLocal && config.SelfBypassMap != nil,
 	}
@@ -413,6 +437,14 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride, 
 			localEthernetSection = "classifier/local_egress_ethernet_process"
 			localRawIPSection = "classifier/local_egress_raw_ip_process"
 		}
+		if config.Isolated {
+			localEthernetSection = "classifier/local_egress_ethernet_isolated"
+			localRawIPSection = "classifier/local_egress_raw_ip_isolated"
+			if config.TrackProcess {
+				localEthernetSection += "_process"
+				localRawIPSection += "_process"
+			}
+		}
 		selections = append(selections,
 			programSelection{section: localEthernetSection, kernelProgramName: kernelProgramNameTCLocalEthernet},
 			programSelection{section: localRawIPSection, kernelProgramName: kernelProgramNameTCLocalRawIP},
@@ -429,14 +461,21 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride, 
 			sharedEthernetSection += "_legacy"
 			sharedRawIPSection += "_legacy"
 		}
+		if config.Isolated {
+			sharedEthernetSection = "classifier/shared_ingress_ethernet_isolated"
+			sharedRawIPSection = "classifier/shared_ingress_raw_ip_isolated"
+		}
 		selections = append(selections,
 			programSelection{section: sharedEthernetSection, kernelProgramName: kernelProgramNameTCSharedEthernet},
 			programSelection{section: sharedRawIPSection, kernelProgramName: kernelProgramNameTCSharedRawIP},
 		)
 		programIndexes = append(programIndexes, tcProgramSharedIngressEthernet, tcProgramSharedIngressRawIP)
 	}
-	if config.EnableLocal {
+	if config.EnableLocal || config.Isolated {
 		deliverySection := "classifier/delivery_ingress"
+		if config.Isolated {
+			deliverySection = "classifier/isolated_delivery"
+		}
 		if !config.EnableTCP {
 			deliverySection += "_udp"
 		} else if legacyTCP {
@@ -444,6 +483,10 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride, 
 		}
 		selections = append(selections, programSelection{section: deliverySection, kernelProgramName: kernelProgramNameTCDelivery})
 		programIndexes = append(programIndexes, tcProgramDeliveryIngress)
+	}
+	if config.Isolated {
+		selections = append(selections, programSelection{section: "classifier/isolated_return", kernelProgramName: "sb_tc_return"})
+		programIndexes = append(programIndexes, tcProgramIsolatedReturn)
 	}
 	loadedPrograms, err := loadObjectPrograms(loadTC, maps, selections)
 	if err != nil {
@@ -720,11 +763,7 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	result := TCAssignmentSweepResult{Usage: MapUsage{Capacity: b.assignmentCapacity}}
 	now := monotonicNowNS()
 	maxIdleNS := uint64(maxIdle)
-	if now <= maxIdleNS {
-		result.UsageKnown = true
-		return result, nil
-	}
-	staleBefore := now - maxIdleNS
+	staleBefore := now - min(now, maxIdleNS)
 	b.assignmentSweepCandidates = b.assignmentSweepCandidates[:0]
 	scan, err := b.assignmentSweepScratch.scan(
 		b.runtime.maps["tc_assignment"], b.assignmentCapacity, fallbackBudget,
@@ -766,6 +805,11 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 		}
 		result.UsageKnown = true
 		result.Pressure = uint64(result.Usage.Entries)*100 >= uint64(result.Usage.Capacity)*70
+	}
+	if b.isolated {
+		if err = b.sweepReturnRoutesLocked(max(maxIdle, time.Second), fallbackBudget, &result); err != nil {
+			return result, err
+		}
 	}
 	return result, nil
 }
@@ -811,6 +855,15 @@ func (b *TCBackend) Stats() (TCStats, error) {
 		return TCStats{}, err
 	}
 	if stats.SharedFragmentPasses, err = read(tcStatSharedFragmentPass); err != nil {
+		return TCStats{}, err
+	}
+	if stats.ReturnUpdateFailures, err = read(tcStatReturnUpdateFailure); err != nil {
+		return TCStats{}, err
+	}
+	if stats.ReturnConflicts, err = read(tcStatReturnConflict); err != nil {
+		return TCStats{}, err
+	}
+	if stats.ReturnLookupFailures, err = read(tcStatReturnLookupFailure); err != nil {
 		return TCStats{}, err
 	}
 	return stats, nil
@@ -1064,6 +1117,8 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
 }
 
 func (b *TCBackend) DeliveryIngressProgramFD() int { return b.programFD(tcProgramDeliveryIngress) }
+func (b *TCBackend) IsolatedReturnProgramFD() int  { return b.programFD(tcProgramIsolatedReturn) }
+func (b *TCBackend) Isolated() bool                { return b != nil && b.isolated }
 
 func (b *TCBackend) programFD(index int) int {
 	if b == nil {
@@ -1112,6 +1167,11 @@ func (b *TCBackend) Close() error {
 	b.assignmentCapacity = 0
 	b.assignmentSweepCandidates = nil
 	b.assignmentSweepScratch = mapScanScratch[tcAssignKey, TCAssignment]{}
+	b.returnAccess.Lock()
+	b.returnReferences = nil
+	b.returnSweepScratch = mapScanScratch[tcAssignKey, tcReturnValue]{}
+	b.returnFragmentSweepScratch = mapScanScratch[tcAssignKey, tcReturnValue]{}
+	b.returnAccess.Unlock()
 	b.selfMapExternal = false
 	b.bypassIPv4 = nil
 	b.bypassIPv6 = nil

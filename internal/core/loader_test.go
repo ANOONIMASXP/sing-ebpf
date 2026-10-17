@@ -281,6 +281,8 @@ func TestEmbeddedTCObjectLayout(t *testing.T) {
 		"tc_control":             {4, 72},
 		"tc_listener_sockets":    {4, 4},
 		"tc_assignment":          {44, 32},
+		"tc_return":              {44, 40},
+		"tc_return_frag":         {44, 40},
 		"tc_stats":               {4, 8},
 		"tc_self_sockets":        {8, 4},
 		"tc_uid_policy":          {8, 1},
@@ -306,6 +308,16 @@ func TestEmbeddedTCObjectLayout(t *testing.T) {
 		"classifier/shared_ingress_ethernet",
 		"classifier/shared_ingress_raw_ip",
 		"classifier/delivery_ingress",
+		"classifier/isolated_delivery",
+		"classifier/isolated_delivery_legacy",
+		"classifier/isolated_delivery_udp",
+		"classifier/isolated_return",
+		"classifier/local_egress_ethernet_isolated",
+		"classifier/local_egress_raw_ip_isolated",
+		"classifier/local_egress_ethernet_isolated_process",
+		"classifier/local_egress_raw_ip_isolated_process",
+		"classifier/shared_ingress_ethernet_isolated",
+		"classifier/shared_ingress_raw_ip_isolated",
 	})
 }
 

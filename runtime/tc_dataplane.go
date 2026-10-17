@@ -101,6 +101,10 @@ type tcInterfaceAttachment struct {
 }
 
 type tcDeliveryLink struct {
+	namespace     *TCNamespace
+	returnFilter  *netlink.BpfFilter
+	enableIPv6    bool
+	replyMTU      int
 	redirectName  string
 	deliveryName  string
 	redirect      netlink.Link
@@ -117,6 +121,9 @@ type tcSysctlState struct {
 }
 
 type tcDataPlane struct {
+	namespace             *TCNamespace
+	enableIPv6            bool
+	replyMTU              int
 	access                sync.Mutex
 	backend               *commonEBPF.TCBackend
 	routing               *tcPolicyRouting
@@ -204,8 +211,13 @@ func startTCDataPlane(
 	hostAddresses []netip.Addr,
 	sharedSourceMACPolicy bool,
 	priority uint16,
+	namespaces ...*TCNamespace,
 ) (*tcDataPlane, error) {
 	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
+	if len(namespaces) != 0 {
+		dataPlane.namespace = namespaces[0]
+	}
+	dataPlane.enableIPv6 = enableIPv6
 	cleanup := func(startErr error) (*tcDataPlane, error) {
 		closeErr := dataPlane.Close()
 		if !dataPlane.IsClosed() {
@@ -213,15 +225,28 @@ func startTCDataPlane(
 		}
 		return nil, E.Errors(startErr, closeErr)
 	}
-	routing, err := startTCPolicyRouting(enableIPv6)
-	dataPlane.routing = routing
+	if rawTCBackend(backend).Isolated() != (dataPlane.namespace != nil) {
+		return cleanup(E.New("TC backend and runtime namespace isolation must agree"))
+	}
+	if dataPlane.namespace != nil {
+		var err error
+		dataPlane.replyMTU, err = dataPlane.isolatedReplyMTU(localInterface, sharedInterfaces)
+		if err != nil {
+			return cleanup(err)
+		}
+	}
+	err := dataPlane.inNamespace(func() error {
+		var err error
+		dataPlane.routing, err = startTCPolicyRouting(enableIPv6)
+		return err
+	})
 	if err != nil {
 		return cleanup(err)
 	}
-	if err = backend.SetRoutingMark(routing.mark); err != nil {
+	if err = backend.SetRoutingMark(dataPlane.routing.mark); err != nil {
 		return cleanup(E.Cause(err, "set TC eBPF routing mark"))
 	}
-	if localEnabled {
+	if localEnabled || dataPlane.namespace != nil {
 		delivery, err := dataPlane.createTCDeliveryLink()
 		dataPlane.delivery = delivery
 		if err != nil {
@@ -1071,7 +1096,7 @@ func (d *tcDataPlane) Close() error {
 	if len(d.attachments) != 0 || len(d.retiredAttachments) != 0 {
 		return closeErr
 	}
-	closeErr = E.Errors(closeErr, d.routing.Close())
+	closeErr = E.Errors(closeErr, d.inNamespace(d.routing.Close))
 	if d.routing.IsClosed() {
 		d.routing = nil
 	}

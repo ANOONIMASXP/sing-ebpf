@@ -9,6 +9,15 @@ import (
 )
 
 func TestTCABI(t *testing.T) {
+	if size := unsafe.Sizeof(tcReturnValue{}); size != 40 {
+		t.Fatalf("unexpected TC return value size: %d", size)
+	}
+	if offset := unsafe.Offsetof(tcReturnValue{}.InterfaceIndex); offset != 16 {
+		t.Fatalf("unexpected TC return ifindex offset: %d", offset)
+	}
+	if offset := unsafe.Offsetof(tcReturnValue{}.DestinationMAC); offset != 30 {
+		t.Fatalf("unexpected TC return MAC offset: %d", offset)
+	}
 	if size := unsafe.Sizeof(tcControl{}); size != 72 {
 		t.Fatalf("unexpected TC control size: %d", size)
 	}

@@ -17,6 +17,7 @@ type AttachmentInfo struct {
 // delivery and policy-routing state. It intentionally omits netlink objects,
 // routes, rules, sysctl ownership records, and file descriptors.
 type TCNetworkInfo struct {
+	Namespace              string
 	DeliveryInterface      string
 	DeliveryInterfaceIndex int
 	RoutingMark            uint32

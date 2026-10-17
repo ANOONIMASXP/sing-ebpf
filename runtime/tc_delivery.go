@@ -17,6 +17,9 @@ import (
 )
 
 func (d *tcDataPlane) createTCDeliveryLink() (*tcDeliveryLink, error) {
+	if d.namespace != nil {
+		return d.createIsolatedTCDeliveryLink()
+	}
 	backend := d.backend
 	priority := d.priority
 	linkByName := d.linkByName()
@@ -379,12 +382,15 @@ func restoreTCSysctlStatesOwned(states *[]tcSysctlState) error {
 }
 
 func (d *tcDeliveryLink) IsClosed() bool {
-	return d == nil || d.filter == nil && d.redirect == nil && d.delivery == nil && len(d.sysctls) == 0 && len(d.globalSysctls) == 0
+	return d == nil || d.filter == nil && d.returnFilter == nil && d.redirect == nil && d.delivery == nil && len(d.sysctls) == 0 && len(d.globalSysctls) == 0
 }
 
 func (d *tcDeliveryLink) Close() error {
 	if d == nil {
 		return nil
+	}
+	if d.namespace != nil {
+		return d.closeIsolated()
 	}
 	if err := detachTCFilterOwned(&d.filter); err != nil {
 		return err

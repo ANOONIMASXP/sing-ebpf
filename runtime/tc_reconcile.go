@@ -33,6 +33,19 @@ func (d *tcDataPlane) reconcile(localInterface string, sharedInterfaces []string
 	if err != nil {
 		return err
 	}
+	if d.namespace != nil {
+		mtu, mtuErr := d.isolatedReplyMTU(localInterface, sharedInterfaces)
+		if mtuErr != nil {
+			return mtuErr
+		}
+		if d.delivery != nil && d.delivery.replyMTU != mtu {
+			d.delivery.replyMTU = mtu
+			if err = d.inNamespace(func() error { _, err := d.delivery.configureIsolatedPeer(true); return err }); err != nil {
+				return err
+			}
+		}
+		d.replyMTU = mtu
+	}
 	current := make(map[string]*tcInterfaceAttachment, len(d.attachments))
 	for _, attachment := range d.attachments {
 		current[attachment.interfaceName] = attachment
@@ -527,9 +540,17 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
 	if err := d.closeRetired(); err != nil {
 		return false, err
 	}
-	routingChanged, routingErr := d.routing.ensure()
+	var routingChanged bool
+	routingErr := d.inNamespace(func() error { var err error; routingChanged, err = d.routing.ensure(); return err })
 	if d.delivery == nil {
 		return routingChanged, routingErr
+	}
+	if d.namespace != nil {
+		mtu, err := d.isolatedReplyMTU(d.localInterface, d.sharedInterfaces)
+		if err != nil {
+			return routingChanged, E.Errors(routingErr, err)
+		}
+		d.replyMTU, d.delivery.replyMTU = mtu, mtu
 	}
 	deliveryChanged, replaceDelivery, err := d.delivery.repair(d.backend, d.priority)
 	if err != nil {
@@ -561,6 +582,9 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
 }
 
 func (d *tcDeliveryLink) repair(backend *commonEBPF.TCBackend, priority uint16) (bool, bool, error) {
+	if d != nil && d.namespace != nil {
+		return d.repairIsolated(backend, priority)
+	}
 	if d == nil || d.redirect == nil || d.delivery == nil || d.filter == nil {
 		return false, true, nil
 	}

@@ -25,9 +25,8 @@ func newRealICMPEchoReplyBackendWithIPv6(t *testing.T) *commonEBPF.TCBackend {
 func newRealICMPEchoReplyBackendFor(t *testing.T, enableIPv6 bool) *commonEBPF.TCBackend {
 	t.Helper()
 	policyConfig := commonEBPF.ActionPolicy{
-		EnableTCP: true,
-		Local:     commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept, DestinationCIDR: []commonEBPF.CIDRDecision{{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: commonEBPF.DecisionIntercept}}},
-		Shared:    commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept, DestinationCIDR: []commonEBPF.CIDRDecision{{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: commonEBPF.DecisionIntercept}}},
+		Local:  commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept, DestinationCIDR: []commonEBPF.CIDRDecision{{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: commonEBPF.DecisionIntercept}}},
+		Shared: commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept, DestinationCIDR: []commonEBPF.CIDRDecision{{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: commonEBPF.DecisionIntercept}}},
 	}
 	if enableIPv6 {
 		prefix := commonEBPF.CIDRDecision{Prefix: netip.MustParsePrefix("fc00::/18"), Action: commonEBPF.DecisionIntercept}
@@ -62,9 +61,8 @@ func newRealICMPEchoSharedPacketRewriteBackend(t *testing.T) *commonEBPF.SharedP
 func newRealICMPEchoSharedPacketRewriteBackendFor(t *testing.T, enableIPv6 bool) *commonEBPF.SharedPacketRewriteBackend {
 	t.Helper()
 	policyConfig := commonEBPF.ActionPolicy{
-		EnableTCP: true,
-		Local:     commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept, DestinationCIDR: []commonEBPF.CIDRDecision{{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: commonEBPF.DecisionIntercept}}},
-		Shared:    commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept, DestinationCIDR: []commonEBPF.CIDRDecision{{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: commonEBPF.DecisionIntercept}}},
+		Local:  commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept, DestinationCIDR: []commonEBPF.CIDRDecision{{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: commonEBPF.DecisionIntercept}}},
+		Shared: commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept, DestinationCIDR: []commonEBPF.CIDRDecision{{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: commonEBPF.DecisionIntercept}}},
 	}
 	config := commonEBPF.SharedPacketRewriteConfig{
 		ListenerPort:  23458,

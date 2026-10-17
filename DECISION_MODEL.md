@@ -36,6 +36,14 @@ Port actions encode pass/intercept plus `AfterSelectors`. Priority ports run
 before UID/source selectors; after-selector ports run after them but before
 destination bypass. There is no native DNS mode or port-53 special case.
 
+`ActionScope.Default` is the explicit unmatched UID/source action in both
+scopes. Matching source CIDR/MAC pass actions take precedence over intercept
+actions; an intercept match in either dimension selects the packet. UID pass
+ranges likewise subtract from overlapping intercept ranges. Merely adding an
+intercept rule never changes the unmatched action. A consumer implementing an
+include list must set `Default: DecisionPass` explicitly. Protocol enablement
+belongs only to backend configuration, not to `ActionPolicy`.
+
 ## Runtime status
 
 All four data paths now have action-level update entry points:

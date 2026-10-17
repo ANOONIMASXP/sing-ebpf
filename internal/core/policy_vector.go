@@ -13,8 +13,7 @@ type policyVector struct {
 	EnableSharedIPv6    bool
 	UIDPolicy           bool
 	UIDDefaultBypass    bool
-	LocalBypassPrivate  bool
-	SharedBypassPrivate bool
+	SharedDefaultBypass bool
 	LocalBypassPort     bool
 	SharedBypassPort    bool
 	BypassIPv4          bool
@@ -55,10 +54,7 @@ func (v policyVector) tcFlags() uint32 {
 	if v.UIDDefaultBypass {
 		flags |= 1 << 5
 	}
-	if v.LocalBypassPrivate {
-		flags |= 1 << 6
-	}
-	if v.SharedBypassPrivate {
+	if v.SharedDefaultBypass {
 		flags |= 1 << 7
 	}
 	if v.BypassIPv4 {
@@ -132,9 +128,6 @@ func (v policyVector) cgroupFlags() uint32 {
 	if v.BypassIPv6 {
 		flags |= cgroupFlagBypassIPv6
 	}
-	if v.LocalBypassPrivate {
-		flags |= cgroupFlagBypassPrivateAddress
-	}
 	if v.HostIPv4 {
 		flags |= cgroupFlagHostIPv4
 	}
@@ -194,8 +187,8 @@ func (v policyVector) sharedFlags() uint32 {
 	if v.ExcludeSourceMAC {
 		flags |= sharedPacketRewriteFlagExcludeSourceMAC
 	}
-	if v.SharedBypassPrivate {
-		flags |= sharedPacketRewriteFlagBypassPrivateAddress
+	if v.SharedDefaultBypass {
+		flags |= sharedPacketRewriteFlagDefaultBypass
 	}
 	if v.BypassFlowCache {
 		flags |= sharedPacketRewriteFlagBypassFlowCache

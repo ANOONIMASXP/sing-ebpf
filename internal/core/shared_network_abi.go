@@ -149,7 +149,7 @@ const (
 	sharedPacketRewriteFlagExcludeSource
 	sharedPacketRewriteFlagIncludeSourceMAC
 	sharedPacketRewriteFlagExcludeSourceMAC
-	sharedPacketRewriteFlagBypassPrivateAddress
+	sharedPacketRewriteFlagDefaultBypass
 	sharedPacketRewriteFlagBypassFlowCache
 	_
 	sharedPacketRewriteFlagForceInterceptIPv4

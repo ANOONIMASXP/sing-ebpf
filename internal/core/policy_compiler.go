@@ -3,9 +3,10 @@
 package core
 
 import (
-	E "github.com/sagernet/sing/common/exceptions"
 	"net/netip"
 	"slices"
+
+	E "github.com/sagernet/sing/common/exceptions"
 )
 
 // CompiledPolicy is an immutable, independently scoped match/action snapshot.
@@ -14,7 +15,7 @@ import (
 type CompiledPolicy struct {
 	uidEntries              []uidLPMKey
 	uidDefaultBypass        bool
-	sharedBypassPrivate     bool
+	sharedDefaultBypass     bool
 	localForce              dualStackCIDRPrefixes
 	sharedForce             dualStackCIDRPrefixes
 	includeSource           dualStackCIDRPrefixes
@@ -52,7 +53,8 @@ func CompileActionPolicy(config ActionPolicy) (CompiledPolicy, error) {
 	}
 	return CompiledPolicy{
 		uidEntries: local.uidEntries, uidDefaultBypass: local.uidDefaultBypass,
-		localForce: local.force, sharedForce: shared.force,
+		sharedDefaultBypass: config.Shared.Default == DecisionPass,
+		localForce:          local.force, sharedForce: shared.force,
 		includeSource: shared.includeSource, excludeSource: shared.excludeSource,
 		includeSourceMAC: shared.includeSourceMAC, excludeSourceMAC: shared.excludeSourceMAC,
 		localBypassPortEntries: local.ports, sharedBypassPortEntries: shared.ports,

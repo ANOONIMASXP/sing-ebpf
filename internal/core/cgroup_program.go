@@ -196,7 +196,6 @@ func (b *CgroupBackend) updateCgroupControl(listenerPort uint16) error {
 		EnableLocalIPv6:    b.enableIPv6,
 		UIDPolicy:          b.runtime.uid_policy,
 		UIDDefaultBypass:   b.runtime.uid_default_bypass,
-		LocalBypassPrivate: b.bypassPrivateAddress,
 		BypassIPv4:         b.runtime.bypass_ipv4_policy,
 		BypassIPv6:         b.runtime.bypass_ipv6_policy,
 		HostIPv4:           len(b.hostIPv4) > 0,

@@ -13,9 +13,8 @@ import (
 func newTestSharedNetworkForceInterceptPolicy(t *testing.T, forceInterceptIPv4 string) CompiledPolicy {
 	t.Helper()
 	config := ActionPolicy{
-		EnableTCP: true,
-		Local:     ActionScope{Default: DecisionIntercept},
-		Shared:    ActionScope{Default: DecisionIntercept},
+		Local:  ActionScope{Default: DecisionIntercept},
+		Shared: ActionScope{Default: DecisionIntercept},
 	}
 	if forceInterceptIPv4 != "" {
 		config.Shared.DestinationCIDR = []CIDRDecision{{Prefix: netip.MustParsePrefix(forceInterceptIPv4), Action: DecisionIntercept}}

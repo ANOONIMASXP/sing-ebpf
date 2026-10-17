@@ -46,7 +46,7 @@ const (
 	cgroupFlagBypassIPv6
 	_
 	cgroupFlagUDPFlow
-	cgroupFlagBypassPrivateAddress
+	_
 	_
 	cgroupFlagHostIPv4
 	cgroupFlagHostIPv6

@@ -93,7 +93,6 @@ func TestCgroupInitialBypassCIDRCountTracksLoadedPolicy(t *testing.T) {
 	}
 	defer selfBypassMap.Close()
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
 		Local: ActionScope{
 			Default: DecisionIntercept,
 			DestinationCIDR: []CIDRDecision{
@@ -241,7 +240,6 @@ func TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass(t *testing.T) {
 	}
 	uid := uint32(os.Geteuid())
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableUDP: true,
 		Local: ActionScope{
 			Default: DecisionPass,
 			UID:     []UIDDecision{{Start: uid, End: uid, Action: DecisionIntercept}},
@@ -429,10 +427,8 @@ func prepareCgroupIntegrationBackend(path string, enableTCP, enableUDP, enableIP
 		return nil, err
 	}
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: enableTCP,
-		EnableUDP: enableUDP,
-		Local:     ActionScope{Default: DecisionIntercept},
-		Shared:    ActionScope{Default: DecisionIntercept},
+		Local:  ActionScope{Default: DecisionIntercept},
+		Shared: ActionScope{Default: DecisionIntercept},
 	})
 	if err != nil {
 		_ = selfBypassMap.Close()

@@ -73,7 +73,7 @@ func TestSharedRewriteUDPChecksumDeliveryIntegration(t *testing.T) {
 			if err = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &timeout); err != nil {
 				t.Fatal(err)
 			}
-			policy, err := commonEBPF.CompileActionPolicy(commonEBPF.ActionPolicy{EnableUDP: true, Shared: commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept}})
+			policy, err := commonEBPF.CompileActionPolicy(commonEBPF.ActionPolicy{Shared: commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept}})
 			if err != nil {
 				t.Fatal(err)
 			}

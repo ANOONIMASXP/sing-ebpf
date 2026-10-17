@@ -166,7 +166,7 @@ func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded, listener
 	}
 	defer tcp.Close()
 	defer udp.Close()
-	policy, err := commonEBPF.CompileActionPolicy(commonEBPF.ActionPolicy{EnableTCP: true, EnableUDP: true, Local: commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept}, Shared: commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept}})
+	policy, err := commonEBPF.CompileActionPolicy(commonEBPF.ActionPolicy{Local: commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept}, Shared: commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept}})
 	if err != nil {
 		t.Fatal(err)
 	}

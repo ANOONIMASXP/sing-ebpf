@@ -15,11 +15,10 @@ import (
 func TestTCProgramRunIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "run unified TC eBPF programs in the kernel")
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
-		Local:     ActionScope{Default: DecisionIntercept},
+		Local: ActionScope{Default: DecisionIntercept},
 		Shared: ActionScope{
 			DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionIntercept, AfterSelectors: true}},
-			Default:         DecisionIntercept,
+			Default:         DecisionPass,
 			DestinationCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept}},
 			SourceMAC:       []MACDecision{{Address: MACAddress{0x02, 0, 0, 0, 0, 1}, Action: DecisionIntercept}},
 			SourceCIDR:      []CIDRDecision{{Prefix: netip.MustParsePrefix("192.0.2.0/24"), Action: DecisionIntercept}, {Prefix: netip.MustParsePrefix("203.0.113.0/24"), Action: DecisionPass}},
@@ -122,9 +121,8 @@ func TestTCProgramRunIntegration(t *testing.T) {
 func TestForceInterceptPolicyPrecedenceIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify ForceIntercept policy precedence in every TC data plane")
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
-		Local:     ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept}, {Prefix: netip.MustParsePrefix("fd00:198:18::/48"), Action: DecisionIntercept}}},
-		Shared:    ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept}, {Prefix: netip.MustParsePrefix("fd00:198:18::/48"), Action: DecisionIntercept}}, SourceMAC: []MACDecision{{Address: MACAddress{0x02, 0, 0, 0, 0, 3}, Action: DecisionIntercept}}},
+		Local:  ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept}, {Prefix: netip.MustParsePrefix("fd00:198:18::/48"), Action: DecisionIntercept}}},
+		Shared: ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept}, {Prefix: netip.MustParsePrefix("fd00:198:18::/48"), Action: DecisionIntercept}}, SourceMAC: []MACDecision{{Address: MACAddress{0x02, 0, 0, 0, 0, 3}, Action: DecisionIntercept}}},
 	})
 	if err != nil {
 		t.Fatal(err)

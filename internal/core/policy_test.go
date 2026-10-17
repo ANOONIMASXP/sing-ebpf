@@ -145,8 +145,6 @@ func TestCompileActionPolicySnapshot(t *testing.T) {
 	includeSource := []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
 	includeMAC := []MACAddress{{0x02, 0, 0, 0, 0, 1}}
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
-		EnableUDP: true,
 		Local: ActionScope{
 			Default:         DecisionPass,
 			UID:             includeUID,
@@ -182,8 +180,6 @@ func TestCompileActionPolicySnapshot(t *testing.T) {
 
 func TestCompileActionPolicyAllowsGlobalDNSHijackWithUIDPassDefault(t *testing.T) {
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
-		EnableUDP: true,
 		Local: ActionScope{
 			Default: DecisionPass,
 			UID:     []UIDDecision{{Start: 1000, End: 1000, Action: DecisionIntercept}},

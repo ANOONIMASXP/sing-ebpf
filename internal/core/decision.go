@@ -57,6 +57,10 @@ type MACDecision struct {
 // ActionScope contains only match primitives and their final actions. It does
 // not encode include/exclude, DNS, FakeIP, or rule-set semantics.
 type ActionScope struct {
+	// Default applies when no UID (local) or source CIDR/MAC (shared)
+	// decision matches. Matching pass decisions take precedence over intercept
+	// decisions; an intercept match in either source dimension selects a packet.
+	// Destination interception and priority port actions precede this stage.
 	Default         Decision
 	UID             []UIDDecision
 	SourceCIDR      []CIDRDecision
@@ -68,10 +72,8 @@ type ActionScope struct {
 // ActionPolicy is the policy input for the action-only API. The caller owns
 // configuration semantics and supplies the final action for every rule.
 type ActionPolicy struct {
-	EnableTCP bool
-	EnableUDP bool
-	Local     ActionScope
-	Shared    ActionScope
+	Local  ActionScope
+	Shared ActionScope
 }
 
 func compileDestinationPassDecisions(decisions []CIDRDecision) (dualStackCIDRPrefixes, error) {

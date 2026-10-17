@@ -553,10 +553,7 @@ INLINE int handle_v4(
     }
     if (!force_intercept && !selected_intercept) {
         if ((config->flags & SB_EBPF_CGROUP_FLAG_HOST_IPV4) != 0U && host_ipv4(destination)) return 1;
-        if (((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
-                sb_ebpf_ipv4_private_address(destination_bytes)) ||
-             ((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_IPV4) != 0U &&
-                bypass_ipv4_cidr(destination))) {
+        if ((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_IPV4) != 0U && bypass_ipv4_cidr(destination)) {
             if (!connect_hook) {
                 flow_store(config, AF_INET_VALUE, protocol, port, flow_address, cookie,
                     SB_EBPF_UDP_FLOW_ACTION_BYPASS, 0);
@@ -643,10 +640,7 @@ INLINE int handle_v6(
         }
         if (!force_intercept && !selected_intercept) {
             if ((config->flags & SB_EBPF_CGROUP_FLAG_HOST_IPV4) != 0U && host_ipv4(destination)) return 1;
-            if (((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
-                    sb_ebpf_ipv4_private_address(destination_bytes)) ||
-                 ((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_IPV4) != 0U &&
-                    bypass_ipv4_cidr(destination))) {
+            if ((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_IPV4) != 0U && bypass_ipv4_cidr(destination)) {
                 if (!connect_hook) {
                     flow_store(config, AF_INET_VALUE, protocol, port, flow_address, cookie,
                         SB_EBPF_UDP_FLOW_ACTION_BYPASS, 0);
@@ -697,10 +691,7 @@ INLINE int handle_v6(
     }
     if (!force_intercept && !selected_intercept) {
         if ((config->flags & SB_EBPF_CGROUP_FLAG_HOST_IPV6) != 0U && host_ipv6(address)) return 1;
-        if (((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
-                sb_ebpf_ipv6_private_address((const __u8 *)address)) ||
-             ((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_IPV6) != 0U &&
-                bypass_ipv6_cidr(address))) {
+        if ((config->flags & SB_EBPF_CGROUP_FLAG_BYPASS_IPV6) != 0U && bypass_ipv6_cidr(address)) {
             if (!connect_hook) {
                 flow_store(config, AF_INET6_VALUE, protocol, port, flow_address, cookie,
                     SB_EBPF_UDP_FLOW_ACTION_BYPASS, 0);

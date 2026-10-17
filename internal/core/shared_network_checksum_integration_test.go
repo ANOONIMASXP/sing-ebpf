@@ -21,7 +21,7 @@ func TestSharedPacketRewriteUDPChecksumIntegration(t *testing.T) {
 				name = family + "/disabled"
 			}
 			t.Run(name, func(t *testing.T) {
-				policy, err := CompileActionPolicy(ActionPolicy{EnableUDP: true, Shared: ActionScope{Default: DecisionIntercept}})
+				policy, err := CompileActionPolicy(ActionPolicy{Shared: ActionScope{Default: DecisionIntercept}})
 				if err != nil {
 					t.Fatal(err)
 				}

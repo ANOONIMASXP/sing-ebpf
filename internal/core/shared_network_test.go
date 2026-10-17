@@ -75,8 +75,8 @@ func TestSharedNetworkABI(t *testing.T) {
 	if size := unsafe.Sizeof(sharedNetworkTokenValue{}); size != 40 {
 		t.Fatalf("unexpected shared-network token value size: %d", size)
 	}
-	if sharedPacketRewriteFlagBypassPrivateAddress != 1<<13 {
-		t.Fatalf("unexpected shared-network private-address flag: %#x", sharedPacketRewriteFlagBypassPrivateAddress)
+	if sharedPacketRewriteFlagDefaultBypass != 1<<13 {
+		t.Fatalf("unexpected shared-network default-action flag: %#x", sharedPacketRewriteFlagDefaultBypass)
 	}
 	if sharedPacketRewriteFlagBypassFlowCache != 1<<14 {
 		t.Fatalf("unexpected shared-network bypass-flow-cache flag: %#x", sharedPacketRewriteFlagBypassFlowCache)

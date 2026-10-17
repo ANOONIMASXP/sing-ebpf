@@ -40,8 +40,7 @@
 #define SB_TC_FLAG_UDP (1U << 3)
 #define SB_TC_FLAG_UID_POLICY (1U << 4)
 #define SB_TC_FLAG_UID_DEFAULT_BYPASS (1U << 5)
-#define SB_TC_FLAG_LOCAL_BYPASS_PRIVATE (1U << 6)
-#define SB_TC_FLAG_SHARED_BYPASS_PRIVATE (1U << 7)
+#define SB_TC_FLAG_SHARED_DEFAULT_BYPASS (1U << 7)
 #define SB_TC_FLAG_BYPASS_IPV4 (1U << 8)
 #define SB_TC_FLAG_BYPASS_IPV6 (1U << 9)
 #define SB_TC_FLAG_LOCAL_BYPASS_IPV4 SB_TC_FLAG_BYPASS_IPV4
@@ -348,11 +347,6 @@ INLINE __u8 port_action(const struct sb_tc_control *control,
     return action != 0 ? *action : 0U;
 }
 
-INLINE bool private_destination(const struct sb_tc_assign_key *key) {
-    if (key->family == AF_INET_VALUE) return sb_ebpf_ipv4_private_address(key->destination_addr);
-    return sb_ebpf_ipv6_private_address(key->destination_addr);
-}
-
 INLINE bool force_intercept_destination(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, bool shared) {
     if (key->family == AF_INET_VALUE) {
@@ -441,7 +435,7 @@ INLINE bool source_mac_included(const struct sb_tc_control *control, const __u8 
 INLINE bool shared_source_selected(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *flow, const __u8 source_mac[6]) {
     if (source_address_excluded(control, flow) || source_mac_excluded(control, source_mac)) return false;
-    if ((control->flags & (SB_TC_FLAG_INCLUDE_SOURCE | SB_TC_FLAG_INCLUDE_SOURCE_MAC)) == 0U) return true;
+    if ((control->flags & SB_TC_FLAG_SHARED_DEFAULT_BYPASS) == 0U) return true;
     return source_address_included(control, flow) || source_mac_included(control, source_mac);
 }
 
@@ -455,7 +449,6 @@ INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *co
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_POLICY_INTERCEPT) == 0U && uid_bypassed(skb, control)) return false;
     if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_INTERCEPT) return true;
     if (host_destination(control, key)) return false;
-    if ((control->flags & SB_TC_FLAG_LOCAL_BYPASS_PRIVATE) != 0U && private_destination(key)) return false;
     return !bypass_destination(control, key, false);
 }
 
@@ -468,7 +461,6 @@ INLINE bool shared_selected(const struct sb_tc_control *control,
     if (!shared_source_selected(control, key, source_mac)) return false;
     if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_INTERCEPT) return true;
     if (host_destination(control, key)) return false;
-    if ((control->flags & SB_TC_FLAG_SHARED_BYPASS_PRIVATE) != 0U && private_destination(key)) return false;
     return !bypass_destination(control, key, true);
 }
 

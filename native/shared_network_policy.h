@@ -76,7 +76,7 @@ INLINE bool ipv4_client_selected(
     const struct sb_shared_control *control) {
     __u32 flags = control->flags;
     if (ipv4_source_excluded(source, flags) || source_mac_excluded(source_mac, flags)) return false;
-    if ((flags & (SB_SHARED_FLAG_INCLUDE_SOURCE | SB_SHARED_FLAG_INCLUDE_SOURCE_MAC)) == 0U) return true;
+    if ((flags & SB_SHARED_FLAG_DEFAULT_BYPASS) == 0U) return true;
     if ((flags & SB_SHARED_SOURCE_IP_POLICY_FLAGS) != 0U && ipv4_source_included(source, flags)) return true;
     if ((flags & SB_SHARED_SOURCE_MAC_POLICY_FLAGS) != 0U && source_mac_included(source_mac, flags)) return true;
     return false;
@@ -88,7 +88,7 @@ INLINE bool ipv6_client_selected(
     const struct sb_shared_control *control) {
     __u32 flags = control->flags;
     if (ipv6_source_excluded(source, flags) || source_mac_excluded(source_mac, flags)) return false;
-    if ((flags & (SB_SHARED_FLAG_INCLUDE_SOURCE | SB_SHARED_FLAG_INCLUDE_SOURCE_MAC)) == 0U) return true;
+    if ((flags & SB_SHARED_FLAG_DEFAULT_BYPASS) == 0U) return true;
     if ((flags & SB_SHARED_SOURCE_IP_POLICY_FLAGS) != 0U && ipv6_source_included(source, flags)) return true;
     if ((flags & SB_SHARED_SOURCE_MAC_POLICY_FLAGS) != 0U && source_mac_included(source_mac, flags)) return true;
     return false;
@@ -118,8 +118,6 @@ NOINLINE __u8 ipv4_policy(
     __builtin_memcpy(key.addr, destination, 4U);
     if ((map_policy_flags & SB_SHARED_FLAG_HOST_IPV4) != 0U &&
         map_lookup(&shared_host_ipv4, &key) != 0) return SB_SHARED_POLICY_BYPASS;
-    if ((control->flags & SB_SHARED_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
-        sb_ebpf_ipv4_private_address(destination)) return SB_SHARED_POLICY_BYPASS;
     if (map_policy_flags == 0U) return SB_SHARED_POLICY_PROXY;
     if ((map_policy_flags & SB_SHARED_FLAG_BYPASS_IPV4) == 0U) return SB_SHARED_POLICY_PROXY;
     return map_lookup(&shared_bypass_ipv4, &key) == 0
@@ -141,8 +139,6 @@ NOINLINE __u8 ipv6_policy(
     if ((map_policy_flags & SB_SHARED_FLAG_HOST_IPV6) != 0U && map_lookup(&shared_host_ipv6, &key) != 0) {
         return SB_SHARED_POLICY_BYPASS;
     }
-    if ((control->flags & SB_SHARED_FLAG_BYPASS_PRIVATE_ADDRESS) != 0U &&
-        sb_ebpf_ipv6_private_address(destination)) return SB_SHARED_POLICY_BYPASS;
     if (map_policy_flags == 0U) return SB_SHARED_POLICY_PROXY;
     if ((map_policy_flags & SB_SHARED_FLAG_BYPASS_IPV6) == 0U) return SB_SHARED_POLICY_PROXY;
     return map_lookup(&shared_bypass_ipv6, &key) == 0

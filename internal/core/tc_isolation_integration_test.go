@@ -6,7 +6,7 @@ import "testing"
 
 func TestTCPListenerDirectFallbackIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify listener fallback before program exposure")
-	policy, err := CompileActionPolicy(ActionPolicy{EnableTCP: true, EnableUDP: true,
+	policy, err := CompileActionPolicy(ActionPolicy{
 		Local: ActionScope{Default: DecisionIntercept}, Shared: ActionScope{Default: DecisionIntercept}})
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestTCIsolatedVerifierIntegration(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		for _, tcp := range []bool{false, true} {
 			for _, process := range []bool{false, true} {
-				policy, err := CompileActionPolicy(ActionPolicy{EnableTCP: tcp, EnableUDP: true,
+				policy, err := CompileActionPolicy(ActionPolicy{
 					Local: ActionScope{Default: DecisionIntercept}, Shared: ActionScope{Default: DecisionIntercept}})
 				if err != nil {
 					t.Fatal(err)

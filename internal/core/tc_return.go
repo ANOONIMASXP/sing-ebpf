@@ -144,8 +144,6 @@ func (b *TCBackend) ReleaseReturnRoute(handle TCReturnHandle) {
 // Caller holds b.access. The reference lock serializes acquisition with idle
 // cleanup, so a live consumer cannot lose its route to a maintenance pass.
 func (b *TCBackend) sweepReturnRoutesLocked(maxIdle time.Duration, budget uint32, result *TCAssignmentSweepResult) error {
-	b.returnAccess.Lock()
-	defer b.returnAccess.Unlock()
 	returnMap := b.runtime.maps["tc_return"]
 	if returnMap == nil {
 		return errBackendClosed
@@ -158,7 +156,7 @@ func (b *TCBackend) sweepReturnRoutesLocked(maxIdle time.Duration, budget uint32
 	}
 	var candidates []candidate
 	scan, err := b.returnSweepScratch.scan(returnMap, b.assignmentCapacity, budget, func(key tcAssignKey, value tcReturnValue) {
-		if value.LastSeenNS != 0 && value.LastSeenNS <= staleBefore && b.returnReferences[tcReturnReference{key, value.Generation}] == 0 {
+		if value.LastSeenNS != 0 && value.LastSeenNS <= staleBefore {
 			candidates = append(candidates, candidate{key, value})
 		}
 	})
@@ -167,27 +165,27 @@ func (b *TCBackend) sweepReturnRoutesLocked(maxIdle time.Duration, budget uint32
 		return err
 	}
 	result.ReturnScanned = scan.Scanned
+	if scan.Restarted {
+		b.returnSweepRemoved = 0
+	}
 	result.Complete = result.Complete && scan.Complete
 	for _, entry := range candidates {
-		var current tcReturnValue
-		if err = returnMap.Lookup(&entry.key, &current); errors.Is(err, unix.ENOENT) {
-			continue
-		} else if err != nil {
-			result.Failure = TCAssignmentSweepFailureLookup
-			return err
+		// Acquisition is serialized only with this candidate's recheck/delete,
+		// not with the entire map traversal.
+		removed, failure, deleteErr := b.deleteIdleReturnRoute(returnMap, entry.key, entry.value)
+		if deleteErr != nil {
+			result.Failure = failure
+			return deleteErr
 		}
-		if current != entry.value {
-			continue
+		if removed {
+			result.ReturnRemoved++
+			b.returnSweepRemoved++
 		}
-		if err = returnMap.Delete(&entry.key); err != nil && !errors.Is(err, unix.ENOENT) {
-			result.Failure = TCAssignmentSweepFailureDelete
-			return err
-		}
-		result.ReturnRemoved++
 	}
 	if scan.Complete {
 		result.ReturnUsageKnown = true
-		result.ReturnUsage = MapUsage{Capacity: b.assignmentCapacity, Entries: scan.Entries - min(scan.Entries, result.ReturnRemoved)}
+		result.ReturnUsage = MapUsage{Capacity: b.assignmentCapacity, Entries: scan.Entries - min(scan.Entries, b.returnSweepRemoved)}
+		b.returnSweepRemoved = 0
 		result.Pressure = result.Pressure || uint64(result.ReturnUsage.Entries)*100 >= uint64(result.ReturnUsage.Capacity)*70
 	}
 	// An incomplete return scan cannot establish the low-water exit condition.
@@ -223,4 +221,27 @@ func (b *TCBackend) sweepReturnRoutesLocked(maxIdle time.Duration, budget uint32
 		}
 	}
 	return nil
+}
+
+func (b *TCBackend) deleteIdleReturnRoute(returnMap *CiliumEBPF.Map, key tcAssignKey, expected tcReturnValue) (bool, string, error) {
+	b.returnAccess.Lock()
+	defer b.returnAccess.Unlock()
+	if b.returnReferences[tcReturnReference{key, expected.Generation}] != 0 {
+		return false, "", nil
+	}
+	var current tcReturnValue
+	if err := returnMap.Lookup(&key, &current); errors.Is(err, unix.ENOENT) {
+		return false, "", nil
+	} else if err != nil {
+		return false, TCAssignmentSweepFailureLookup, err
+	}
+	if current != expected {
+		return false, "", nil
+	}
+	if err := returnMap.Delete(&key); errors.Is(err, unix.ENOENT) {
+		return false, "", nil
+	} else if err != nil {
+		return false, TCAssignmentSweepFailureDelete, err
+	}
+	return true, "", nil
 }

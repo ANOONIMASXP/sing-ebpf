@@ -55,6 +55,8 @@ type SharedPacketRewriteBackend struct {
 	flowWake            chan struct{}
 	flowSweepAccess     sync.Mutex
 	flowSweepScratch    mapScanScratch[sharedNetworkOriginalKey, sharedNetworkTokenValue]
+	purgeSweepScratch   mapScanScratch[sharedNetworkOriginalKey, sharedNetworkTokenValue]
+	purgeInterfaceIndex uint32
 	flowSweepCandidates []sharedNetworkFlowEntry
 	flowSweepRemoved    uint32
 	runtime             *sharedPacketRewriteRuntime

@@ -216,6 +216,8 @@ type TCBackend struct {
 	assignmentMapFD           int
 	assignmentCapacity        uint32
 	assignmentSweepAccess     sync.Mutex
+	assignmentSweepRemoved    uint32
+	returnSweepRemoved        uint32
 	assignmentSweepScratch    mapScanScratch[tcAssignKey, TCAssignment]
 	assignmentSweepCandidates []tcAssignmentSweepEntry
 	selfMapExternal           bool
@@ -821,6 +823,9 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 		return result, err
 	}
 	result.Scanned, result.Complete = scan.Scanned, scan.Complete
+	if scan.Restarted {
+		b.assignmentSweepRemoved = 0
+	}
 	for _, candidate := range b.assignmentSweepCandidates {
 		var current TCAssignment
 		if err = lookupMap(b.assignmentMapFD, unsafe.Pointer(&candidate.key), unsafe.Pointer(&current)); err != nil {
@@ -838,14 +843,11 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 			return result, err
 		}
 		result.Removed++
+		b.assignmentSweepRemoved++
 	}
 	if result.Complete {
-		result.Usage.Entries = scan.Entries
-		if result.Removed >= result.Usage.Entries {
-			result.Usage.Entries = 0
-		} else {
-			result.Usage.Entries -= result.Removed
-		}
+		result.Usage.Entries = scan.Entries - min(scan.Entries, b.assignmentSweepRemoved)
+		b.assignmentSweepRemoved = 0
 		result.UsageKnown = true
 		result.Pressure = uint64(result.Usage.Entries)*100 >= uint64(result.Usage.Capacity)*70
 	}

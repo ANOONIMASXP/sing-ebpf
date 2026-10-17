@@ -124,3 +124,49 @@ func TestLRUFallbackBoundedIntegration(t *testing.T) {
 		t.Fatalf("unexpected bounded LRU entry count: %d", entries)
 	}
 }
+
+func TestMapScanBudgetIntegration(t *testing.T) {
+	requireEBPFIntegration(t, "test resumable map scans")
+	for _, fallback := range []bool{false, true} {
+		m, err := CiliumEBPF.NewMap(&CiliumEBPF.MapSpec{Type: CiliumEBPF.Hash, KeySize: 4, ValueSize: 4, MaxEntries: 512})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = m.Close() })
+		for key := uint32(0); key < 300; key++ {
+			if err = m.Put(key, key); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var scratch mapScanScratch[uint32, uint32]
+		if fallback {
+			scratch.lookupSupport.mode.Store(mapBatchUnsupported)
+		}
+		visited := make(map[uint32]bool)
+		complete := false
+		for pass := 0; pass < 40; pass++ {
+			result, err := scratch.scan(m, 512, 32, func(key, value uint32) {
+				if key != value {
+					t.Fatal("corrupt value")
+				}
+				visited[key] = true
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Scanned > 32 {
+				t.Fatalf("budget exceeded: %+v", result)
+			}
+			if result.Complete {
+				if result.Entries != 300 || len(visited) != 300 {
+					t.Fatalf("incomplete scan: %+v, visited=%d", result, len(visited))
+				}
+				complete = true
+				break
+			}
+		}
+		if !complete {
+			t.Fatal("scan never completed")
+		}
+	}
+}

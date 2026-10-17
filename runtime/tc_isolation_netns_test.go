@@ -177,9 +177,14 @@ func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded, listener
 	defer backend.Close()
 	raw, _ := tcp.(*net.TCPListener).SyscallConn()
 	var registerErr error
-	if err = raw.Control(func(fd uintptr) { registerErr = backend.RegisterTCPListener(ipv6, int(fd)) }); err != nil {
+	var listenerProtocol int
+	if err = raw.Control(func(fd uintptr) {
+		listenerProtocol, _ = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PROTOCOL)
+		registerErr = backend.RegisterTCPListener(ipv6, int(fd))
+	}); err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("TCP listener protocol=%d lookup=%s", listenerProtocol, backend.TCPListenerLookupMode())
 	if registerErr != nil {
 		t.Fatal(registerErr)
 	}

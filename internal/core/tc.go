@@ -210,6 +210,7 @@ type TCBackend struct {
 	health                    backendHealth
 	runtime                   *tcRuntime
 	tcpListenerMap            bool
+	programsExposed           bool
 	control                   tcControl
 	controlMapFD              int
 	assignmentMapFD           int
@@ -422,13 +423,6 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride, 
 	if err != nil {
 		return nil, nil, err
 	}
-	if !legacyTCP {
-		// Map creation/program verification alone do not prove that the
-		// kernel's TCP protocol implements SOCKMAP listener insertion.
-		if err = probeTCPListenerMap(maps["tc_listener_sockets"], config.EnableLocalIPv6 || config.EnableSharedIPv6); err != nil {
-			return nil, nil, E.Errors(err, closeMaps(maps))
-		}
-	}
 	externalSelfMap := config.EnableLocal && config.SelfBypassMap != nil
 	if externalSelfMap {
 		createdMap := maps["tc_self_sockets"]
@@ -514,41 +508,6 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride, 
 		programs[programIndexes[index]] = program
 	}
 	return maps, programs, nil
-}
-
-func probeTCPListenerMap(socketMap *CiliumEBPF.Map, ipv6 bool) error {
-	families := []int{unix.AF_INET}
-	if ipv6 {
-		families = append(families, unix.AF_INET6)
-	}
-	for _, family := range families {
-		fd, err := unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, unix.IPPROTO_TCP)
-		if err != nil {
-			return err
-		}
-		err = func() error {
-			defer unix.Close(fd)
-			var address unix.Sockaddr = &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}
-			if family == unix.AF_INET6 {
-				address = &unix.SockaddrInet6{Addr: [16]byte{15: 1}}
-			}
-			if err := unix.Bind(fd, address); err != nil {
-				return err
-			}
-			if err := unix.Listen(fd, 1); err != nil {
-				return err
-			}
-			key, value := uint32(0), uint32(fd)
-			if err := socketMap.Update(&key, &value, CiliumEBPF.UpdateAny); err != nil {
-				return E.Cause(err, "probe TCP listener SOCKMAP insertion")
-			}
-			return socketMap.Delete(&key)
-		}()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (b *TCBackend) SetRoutingMark(mark uint32) error {
@@ -692,7 +651,12 @@ func (b *TCBackend) SetDeliveryInterface(interfaceIndex uint32, hardwareAddress 
 	return nil
 }
 
+// RegisterTCPListener must precede exposing/attaching any program. An actual
+// listener rejection can select direct lookup even when a synthetic probe or
+// SOCKMAP creation succeeded (socket protocol and namespace both matter).
 func (b *TCBackend) RegisterTCPListener(ipv6 bool, fd int) error {
+	b.access.Lock()
+	defer b.access.Unlock()
 	if !b.tcpListenerMap {
 		return nil
 	}
@@ -704,15 +668,52 @@ func (b *TCBackend) RegisterTCPListener(ipv6 bool, fd int) error {
 		key = tcListenerTCP6
 	}
 	value := uint32(fd)
-	b.access.RLock()
-	defer b.access.RUnlock()
 	if err := b.requireUsableLocked(); err != nil {
 		return err
 	}
 	if err := updateMap(b.runtime.maps["tc_listener_sockets"].FD(), unsafe.Pointer(&key), unsafe.Pointer(&value)); err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) && !b.programsExposed && b.control.Enabled == 0 {
+			if fallbackErr := b.useDirectTCPListenersLocked(); fallbackErr == nil {
+				return nil
+			} else {
+				return E.Errors(E.Cause(err, "register TC eBPF TCP listener"), fallbackErr)
+			}
+		}
 		return E.Cause(err, "register TC eBPF TCP listener")
 	}
 	return nil
+}
+
+func (b *TCBackend) useDirectTCPListenersLocked() error {
+	if b.programsExposed || b.control.Enabled != 0 {
+		return E.New("cannot replace exposed TC listener programs")
+	}
+	var selections []programSelection
+	var indexes []int
+	add := func(index int, section, name string) {
+		if b.runtime.programs[index] != nil {
+			indexes = append(indexes, index)
+			selections = append(selections, programSelection{section: section, kernelProgramName: name})
+		}
+	}
+	if b.isolated {
+		add(tcProgramDeliveryIngress, "classifier/isolated_delivery_legacy", kernelProgramNameTCDelivery)
+	} else {
+		add(tcProgramDeliveryIngress, "classifier/delivery_ingress_legacy", kernelProgramNameTCDelivery)
+		add(tcProgramSharedIngressEthernet, "classifier/shared_ingress_ethernet_legacy", kernelProgramNameTCSharedEthernet)
+		add(tcProgramSharedIngressRawIP, "classifier/shared_ingress_raw_ip_legacy", kernelProgramNameTCSharedRawIP)
+	}
+	programs, err := loadObjectPrograms(loadTC, b.runtime.maps, selections)
+	if err != nil {
+		return err
+	}
+	var closeErr error
+	for n, index := range indexes {
+		closeErr = E.Errors(closeErr, b.runtime.programs[index].Close())
+		b.runtime.programs[index] = programs[n]
+	}
+	b.tcpListenerMap = false
+	return closeErr
 }
 
 func (b *TCBackend) TCPListenerLookupMode() string {
@@ -1166,11 +1167,12 @@ func (b *TCBackend) programFD(index int) int {
 	if b == nil {
 		return -1
 	}
-	b.access.RLock()
-	defer b.access.RUnlock()
+	b.access.Lock()
+	defer b.access.Unlock()
 	if b.runtime == nil || index < 0 || index >= len(b.runtime.programs) || b.runtime.programs[index] == nil {
 		return -1
 	}
+	b.programsExposed = true
 	return b.runtime.programs[index].FD()
 }
 
@@ -1178,11 +1180,12 @@ func (b *TCBackend) program(index int) *CiliumEBPF.Program {
 	if b == nil {
 		return nil
 	}
-	b.access.RLock()
-	defer b.access.RUnlock()
+	b.access.Lock()
+	defer b.access.Unlock()
 	if b.runtime == nil || index < 0 || index >= len(b.runtime.programs) {
 		return nil
 	}
+	b.programsExposed = true
 	return b.runtime.programs[index]
 }
 

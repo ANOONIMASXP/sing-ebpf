@@ -96,6 +96,7 @@ type CgroupBackend struct {
 	udpRecoveryAccess       sync.Mutex
 	recoverySweepScratch    mapScanScratch[listenerLookupKey, originalDestinationValue]
 	recoverySweepCandidates []udpRecoveryEntry
+	recoverySweepRemoved    uint32
 	udpReleaseReadAccess    sync.Mutex
 	udpReplyTokenSequence   atomic.Uint64
 	lookupAndDeleteMode     atomic.Int32

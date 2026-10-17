@@ -44,6 +44,7 @@ func (b *CgroupBackend) Close() error {
 	b.listenerPort = 0
 	b.recoverySweepScratch = mapScanScratch[listenerLookupKey, originalDestinationValue]{}
 	b.recoverySweepCandidates = nil
+	b.recoverySweepRemoved = 0
 	return closeErr
 }
 

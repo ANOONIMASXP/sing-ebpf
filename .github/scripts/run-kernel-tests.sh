@@ -9,7 +9,7 @@ export PATH="$PWD/.kernel-tests/bin:$PATH"
 
 if [[ "$(uname -r)" == 5.4.* ]]; then
   # No sk_assign on upstream 5.4: require real compatibility-path loads/runs.
-  .kernel-tests/core.test -test.v -test.run 'TestCompatibilityObjectsIntegration|TestCgroupProgramMatrixIntegration|TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass|TestCgroupUDPRecoverySweepRemovesExpiredEntries|TestSharedPacketRewrite.*Integration|TestMapScanBudgetIntegration|TestRuntimeInspectionUsesOwnerIDs'
+  .kernel-tests/core.test -test.v -test.run 'TestCompatibilityObjectsIntegration|TestCgroupProgramMatrixIntegration|TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass|TestCgroupUDPRecoverySweep|TestSharedPacketRewrite.*Integration|TestMapScanBudgetIntegration|TestRuntimeInspectionUsesOwnerIDs'
 else
   result=0
   .kernel-tests/core.test -test.v || result=$?

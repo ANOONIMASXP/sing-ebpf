@@ -158,17 +158,69 @@ func TestCgroupUDPRecoverySweepRemovesExpiredEntries(t *testing.T) {
 	if err = updateMap(backend.udpRecoveryMapFD, unsafe.Pointer(&key), unsafe.Pointer(&value)); err != nil {
 		t.Fatal(err)
 	}
-	result, err := backend.SweepUDPRecovery(time.Second, 1024)
-	if err != nil {
-		t.Fatal(err)
+	var removed uint32
+	var complete bool
+	for pass := 0; pass < 8; pass++ {
+		// Unsupported batch commands switch to the bounded per-key iterator
+		// on the next maintenance pass; a single pass need not finish.
+		result, err := backend.SweepUDPRecovery(time.Nanosecond, 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed += result.Removed
+		complete = result.Complete
+		if complete {
+			break
+		}
 	}
-	if result.Removed != 1 {
-		t.Fatalf("recovery sweep removed %d entries, want 1", result.Removed)
+	if !complete || removed != 1 {
+		t.Fatalf("recovery sweep complete=%v removed=%d, want true/1", complete, removed)
 	}
 	var current originalDestinationValue
 	if err = lookupMap(backend.udpRecoveryMapFD, unsafe.Pointer(&key), unsafe.Pointer(&current)); !errors.Is(err, unix.ENOENT) {
 		t.Fatalf("expired recovery entry remained: %v", err)
 	}
+}
+
+func TestCgroupUDPRecoverySweepAccountsAcrossPartialPasses(t *testing.T) {
+	requireEBPFIntegration(t, "test bounded cgroup recovery accounting")
+	m, err := CiliumEBPF.NewMap(&CiliumEBPF.MapSpec{
+		Type: CiliumEBPF.LRUHash, KeySize: uint32(unsafe.Sizeof(listenerLookupKey{})),
+		ValueSize: uint32(unsafe.Sizeof(originalDestinationValue{})), MaxEntries: 64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	backend := &CgroupBackend{
+		runtime:          &cgroupRuntime{maps: map[string]*CiliumEBPF.Map{"cgroup_udp_recovery": m}},
+		udpRecoveryMapFD: m.FD(), mapCapacity: CgroupMapCapacity{UDPRedirect: 64},
+	}
+	backend.recoverySweepScratch.lookupSupport.mode.Store(mapBatchUnsupported)
+	for port := uint16(41000); port < 41003; port++ {
+		key, err := makeListenerLookupKey(ProtocolUDP, netip.AddrPortFrom(netip.MustParseAddr("127.128.0.1"), port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = m.Put(key, originalDestinationValue{CreatedAtNS: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var removed uint32
+	for pass := 0; pass < 8; pass++ {
+		result, err := backend.SweepUDPRecovery(time.Nanosecond, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed += result.Removed
+		if result.Complete {
+			if removed != 3 || result.Usage.Entries != 0 {
+				t.Fatalf("removed=%d final usage=%+v, want 3/0", removed, result.Usage)
+			}
+			return
+		}
+	}
+	t.Fatal("bounded recovery scan did not complete")
 }
 
 // TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass exercises the real

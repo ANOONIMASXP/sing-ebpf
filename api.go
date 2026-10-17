@@ -104,7 +104,6 @@ const (
 	KernelProbeModeLocal  = core.KernelProbeModeLocal
 	KernelProbeModeShared = core.KernelProbeModeShared
 
-	KernelProbeDataPlaneTC            = core.KernelProbeDataPlaneTC
 	KernelProbeDataPlaneCgroup        = core.KernelProbeDataPlaneCgroup
 	KernelProbeDataPlaneSocketAssign  = core.KernelProbeDataPlaneSocketAssign
 	KernelProbeDataPlanePacketRewrite = core.KernelProbeDataPlanePacketRewrite

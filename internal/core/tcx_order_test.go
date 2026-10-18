@@ -60,6 +60,7 @@ func TestAttachTCXOrderedQueryErrors(t *testing.T) {
 		{name: "unsupported", queryErr: CiliumEBPF.ErrNotSupported, wantUnsupported: true},
 		{name: "eopnotsupp", queryErr: unix.EOPNOTSUPP, wantUnsupported: true},
 		{name: "enosys", queryErr: unix.ENOSYS, wantUnsupported: true},
+		{name: "einval", queryErr: unix.EINVAL, wantUnsupported: true},
 		{name: "permission", queryErr: unix.EPERM},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

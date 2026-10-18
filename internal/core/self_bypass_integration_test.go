@@ -14,9 +14,23 @@ import (
 	"strings"
 	"testing"
 
+	CiliumEBPF "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/features"
 	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 )
+
+// requireOwnerMarkingHelper skips where cgroup programs of programType cannot
+// call bpf_get_current_pid_tgid, as on Linux 4.19 and 5.4. The
+// marking hooks then do not load and AttachCgroup keeps userspace
+// registration, which TestSelfBypassFallsBackWhenHooksMarkNothing covers.
+func requireOwnerMarkingHelper(t *testing.T, programType CiliumEBPF.ProgramType) {
+	t.Helper()
+	if err := features.HaveProgramHelper(programType, asm.FnGetCurrentPidTgid); err != nil {
+		t.Skipf("%s programs cannot read the current thread group: %v", programType, err)
+	}
+}
 
 const selfBypassHelperEnv = "SING_EBPF_SELF_BYPASS_HELPER"
 
@@ -139,6 +153,8 @@ func selfBypassMarked(t *testing.T, bypass *SelfBypass, cookie uint64) bool {
 // unmarked, so local interception still applies to them.
 func TestSelfBypassCgroupMarksOnlyOwnerProcess(t *testing.T) {
 	requireEBPFIntegration(t, "attach self-bypass hooks to an exclusive process cgroup")
+	requireOwnerMarkingHelper(t, CiliumEBPF.CGroupSock)
+	requireOwnerMarkingHelper(t, CiliumEBPF.CGroupSockAddr)
 	if _, err := selfBypassOwnerTGID(); err != nil {
 		t.Skipf("automatic self-bypass marking is unavailable: %v", err)
 	}
@@ -175,6 +191,7 @@ func TestSelfBypassCgroupMarksOnlyOwnerProcess(t *testing.T) {
 // fallback used on kernels without socket create/release hooks.
 func TestSelfBypassSocketAddrHooksMarkOnlyOwnerProcess(t *testing.T) {
 	requireEBPFIntegration(t, "attach self-bypass socket-address hooks")
+	requireOwnerMarkingHelper(t, CiliumEBPF.CGroupSockAddr)
 	owner, err := selfBypassOwnerTGID()
 	if err != nil {
 		t.Skipf("automatic self-bypass marking is unavailable: %v", err)

@@ -143,11 +143,12 @@ func testEthernetLink(name string, index int) netlink.Link {
 func TestTCXUnsupportedError(t *testing.T) {
 	if !tcxUnsupportedError(CiliumEBPF.ErrNotSupported) ||
 		!tcxUnsupportedError(errors.Join(errors.New("attach"), unix.EOPNOTSUPP)) ||
-		!tcxUnsupportedError(unix.ENOSYS) {
+		!tcxUnsupportedError(unix.ENOSYS) ||
+		!tcxUnsupportedError(unix.EINVAL) {
 		t.Fatal("expected unsupported TCX errors to be classified")
 	}
-	if tcxUnsupportedError(unix.EPERM) || tcxUnsupportedError(unix.EINVAL) {
-		t.Fatal("permission and interface-specific errors must not disable TCX globally")
+	if tcxUnsupportedError(unix.EPERM) {
+		t.Fatal("permission errors must not disable TCX globally")
 	}
 }
 

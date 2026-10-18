@@ -517,7 +517,8 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
 
 func tcxUnsupportedError(err error) bool {
 	return err != nil && (errors.Is(err, CiliumEBPF.ErrNotSupported) ||
-		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS))
+		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) ||
+		errors.Is(err, unix.EINVAL))
 }
 
 func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend, attachment *tcInterfaceAttachment, priority uint16) (bool, error) {

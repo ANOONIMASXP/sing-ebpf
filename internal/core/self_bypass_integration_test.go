@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 )
 
@@ -240,6 +242,48 @@ func TestSelfBypassFallsBackWhenHooksMarkNothing(t *testing.T) {
 	defer unix.Close(fd)
 	if selfBypassMarked(t, bypass, cookie) {
 		t.Fatal("a removed hook still marked a socket")
+	}
+}
+
+// TestSelfBypassSharedReleaseNeverLeavesExclusiveHook emulates a kernel that
+// rejects both BPF_LINK_CREATE and BPF_F_ALLOW_MULTI on a process cgroup that
+// other processes share. The optional release-only hook must then stay off:
+// an unflagged attach would put the hook in single-program mode and lock the
+// interception backend out of it.
+func TestSelfBypassSharedReleaseNeverLeavesExclusiveHook(t *testing.T) {
+	requireEBPFIntegration(t, "load the self-bypass release program")
+	enterDedicatedSelfBypassCgroup(t, 303)
+	// A second member makes the process cgroup shared.
+	startSelfBypassTestHelper(t)
+
+	bypass, err := NewSelfBypassWithCapacity(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bypass.Close()
+	if _, err = bypass.PreparedMap(); err != nil {
+		t.Fatal(err)
+	}
+	program, err := newSelfBypassReleaseProgram(bypass.sockets.FD())
+	if err != nil {
+		t.Skipf("kernel cannot load the socket-release program: %v", err)
+	}
+	_ = program.Close()
+
+	var flags []uint32
+	replaceCgroupAttachOperations(t, unix.EINVAL, func(current link.RawAttachProgramOptions) error {
+		flags = append(flags, current.Flags)
+		if current.Flags == unix.BPF_F_ALLOW_MULTI {
+			return unix.EINVAL
+		}
+		return nil
+	})
+	attachErr := bypass.AttachCgroup(SelfBypassCgroupConfig{EnableTCP: true, EnableUDP: true})
+	if mode := bypass.Mode(); mode != SelfBypassUserspace {
+		t.Fatalf("mode %s on a shared cgroup without multi-program attach, want %s: %v", mode, SelfBypassUserspace, attachErr)
+	}
+	if !slices.Equal(flags, []uint32{unix.BPF_F_ALLOW_MULTI}) {
+		t.Fatalf("legacy attach flags = %v, want only BPF_F_ALLOW_MULTI", flags)
 	}
 }
 

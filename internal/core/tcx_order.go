@@ -69,7 +69,8 @@ func AttachTCXOrdered(interfaceIndex int, attachType CiliumEBPF.AttachType, prog
 			// explicit unsupported errors recognizable so they can update the
 			// process-wide TCX capability cache.
 			if errors.Is(queryErr, CiliumEBPF.ErrNotSupported) ||
-				errors.Is(queryErr, unix.EOPNOTSUPP) || errors.Is(queryErr, unix.ENOSYS) {
+				errors.Is(queryErr, unix.EOPNOTSUPP) || errors.Is(queryErr, unix.ENOSYS) ||
+				errors.Is(queryErr, unix.EINVAL) {
 				return nil, queryErr
 			}
 			return nil, E.Errors(ErrTCXOrderUnavailable, E.Cause(queryErr, "query TCX programs"))

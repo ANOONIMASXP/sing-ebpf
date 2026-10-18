@@ -16,6 +16,7 @@ import (
 // subset and must return TC_ACT_UNSPEC without changing a byte.
 func TestICMPEchoReplyPassThroughIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify icmp_echo_reply native pass-through behavior")
+	requireTCSocketAssignment(t)
 	policy := newTestForceInterceptPolicy(t, "198.18.0.0/15", "fc00::/18")
 	backend, err := PrepareTC(TCConfig{
 		ListenerPort:    65531,
@@ -88,6 +89,63 @@ func TestICMPEchoReplyPassThroughIntegration(t *testing.T) {
 	}
 	if !bytes.Equal(output, validIPv4) {
 		t.Fatal("feature-off packet was modified")
+	}
+}
+
+// TestICMPEchoReplyAnswersOnlyEchoReplyPrefixIntegration keeps a second
+// force-intercept prefix, such as a VPN range a caller intercepts beside its
+// FakeIP range, out of the local echo responder: its hosts are real.
+func TestICMPEchoReplyAnswersOnlyEchoReplyPrefixIntegration(t *testing.T) {
+	requireEBPFIntegration(t, "verify icmp_echo_reply answers only the echo-reply prefix")
+	requireTCSocketAssignment(t)
+	policy, err := CompileActionPolicy(ActionPolicy{
+		Local: ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{
+			{Prefix: netip.MustParsePrefix("100.64.0.0/10"), Action: DecisionIntercept},
+			{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept, EchoReply: true},
+			{Prefix: netip.MustParsePrefix("fd7a:115c:a1e0::/48"), Action: DecisionIntercept},
+			{Prefix: netip.MustParsePrefix("fc00::/18"), Action: DecisionIntercept, EchoReply: true},
+		}},
+		Shared: ActionScope{Default: DecisionIntercept},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := PrepareTC(TCConfig{
+		ListenerPort:    65531,
+		EnableLocal:     true,
+		EnableIPv4:      true,
+		EnableLocalIPv6: true,
+		EnableTCP:       true,
+		Policy:          policy,
+		ICMPEchoReply:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	program := backend.ICMPEchoLocalReplyProgram(TCLinkFramingEthernet)
+	if program == nil {
+		t.Fatal("icmp_echo_reply local Ethernet program is unavailable")
+	}
+	for _, testCase := range []struct {
+		name     string
+		packet   []byte
+		answered bool
+	}{
+		{"IPv4 echo-reply prefix", testIPv4EchoPacket(netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("198.18.0.1")), true},
+		{"IPv4 second prefix", testIPv4EchoPacket(netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("100.64.0.1")), false},
+		{"IPv6 echo-reply prefix", testIPv6EchoPacket(netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("fc00::1")), true},
+		{"IPv6 second prefix", testIPv6EchoPacket(netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("fd7a:115c:a1e0::1")), false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			action, output := runTCProgram(t, program, testCase.packet)
+			if answered := action != testTCActUnspec; answered != testCase.answered {
+				t.Fatalf("echo request answered = %v, want %v (action=%d)", answered, testCase.answered, action)
+			}
+			if !testCase.answered && !bytes.Equal(output, testCase.packet) {
+				t.Fatal("pass-through echo request was modified")
+			}
+		})
 	}
 }
 

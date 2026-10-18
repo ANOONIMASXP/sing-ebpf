@@ -18,6 +18,8 @@ type CompiledPolicy struct {
 	sharedDefaultBypass     bool
 	localForce              dualStackCIDRPrefixes
 	sharedForce             dualStackCIDRPrefixes
+	localEchoReply          dualStackCIDRPrefixes
+	sharedEchoReply         dualStackCIDRPrefixes
 	includeSource           dualStackCIDRPrefixes
 	excludeSource           dualStackCIDRPrefixes
 	includeSourceMAC        []MACAddress
@@ -55,6 +57,7 @@ func CompileActionPolicy(config ActionPolicy) (CompiledPolicy, error) {
 		uidEntries: local.uidEntries, uidDefaultBypass: local.uidDefaultBypass,
 		sharedDefaultBypass: config.Shared.Default == DecisionPass,
 		localForce:          local.force, sharedForce: shared.force,
+		localEchoReply: local.echoReply, sharedEchoReply: shared.echoReply,
 		includeSource: shared.includeSource, excludeSource: shared.excludeSource,
 		includeSourceMAC: shared.includeSourceMAC, excludeSourceMAC: shared.excludeSourceMAC,
 		localBypassPortEntries: local.ports, sharedBypassPortEntries: shared.ports,
@@ -67,7 +70,7 @@ type compiledActionScope struct {
 	uidDefaultBypass                   bool
 	includeSource, excludeSource       dualStackCIDRPrefixes
 	includeSourceMAC, excludeSourceMAC []MACAddress
-	force, bypass                      dualStackCIDRPrefixes
+	force, bypass, echoReply           dualStackCIDRPrefixes
 	ports                              []compiledPortDecision
 }
 
@@ -81,13 +84,13 @@ func compileActionScope(scope ActionScope, name string) (compiledActionScope, er
 	if err != nil {
 		return result, E.Cause(err, name, " UID policy")
 	}
-	compilePrefixes := func(rules []CIDRDecision, action Decision) (dualStackCIDRPrefixes, error) {
+	compilePrefixes := func(rules []CIDRDecision, action Decision, echoReplyOnly bool) (dualStackCIDRPrefixes, error) {
 		var prefixes []netip.Prefix
 		for _, rule := range rules {
 			if !rule.Prefix.IsValid() || !rule.Action.Valid() {
 				return dualStackCIDRPrefixes{}, E.New("invalid ", name, " CIDR decision")
 			}
-			if rule.Action == action {
+			if rule.Action == action && (!echoReplyOnly || rule.EchoReply) {
 				prefixes = append(prefixes, rule.Prefix)
 			}
 		}
@@ -97,16 +100,29 @@ func compileActionScope(scope ActionScope, name string) (compiledActionScope, er
 		}
 		return dualStackCIDRPrefixes{ipv4, ipv6}, err
 	}
-	if result.includeSource, err = compilePrefixes(scope.SourceCIDR, DecisionIntercept); err != nil {
+	if result.includeSource, err = compilePrefixes(scope.SourceCIDR, DecisionIntercept, false); err != nil {
 		return result, err
 	}
-	if result.excludeSource, err = compilePrefixes(scope.SourceCIDR, DecisionPass); err != nil {
+	if result.excludeSource, err = compilePrefixes(scope.SourceCIDR, DecisionPass, false); err != nil {
 		return result, err
 	}
-	if result.force, err = compilePrefixes(scope.DestinationCIDR, DecisionIntercept); err != nil {
+	if result.force, err = compilePrefixes(scope.DestinationCIDR, DecisionIntercept, false); err != nil {
 		return result, err
 	}
-	if result.bypass, err = compilePrefixes(scope.DestinationCIDR, DecisionPass); err != nil {
+	if result.bypass, err = compilePrefixes(scope.DestinationCIDR, DecisionPass, false); err != nil {
+		return result, err
+	}
+	for _, rule := range scope.SourceCIDR {
+		if rule.EchoReply {
+			return result, E.New("invalid ", name, " source CIDR decision: echo reply applies to destinations")
+		}
+	}
+	for _, rule := range scope.DestinationCIDR {
+		if rule.EchoReply && rule.Action != DecisionIntercept {
+			return result, E.New("invalid ", name, " destination CIDR decision: echo reply requires intercept")
+		}
+	}
+	if result.echoReply, err = compilePrefixes(scope.DestinationCIDR, DecisionIntercept, true); err != nil {
 		return result, err
 	}
 	for _, rule := range scope.SourceMAC {

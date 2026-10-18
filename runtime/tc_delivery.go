@@ -3,13 +3,45 @@
 package runtime
 
 import (
+	"crypto/rand"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
+	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
 	"github.com/sagernet/netlink"
 	E "github.com/sagernet/sing/common/exceptions"
 )
+
+// newTCDeliveryHardwareAddress returns a random locally administered unicast
+// MAC address for one end of the delivery pair.
+//
+// The host end is in the network namespace udevd manages. systemd's
+// 99-default.link (MACAddressPolicy=persistent) replaces a kernel-generated
+// address (NET_ADDR_RANDOM) shortly after the link appears, after the private
+// namespace's static neighbor entry was set to it; an address given at creation
+// is NET_ADDR_SET, which udev leaves alone. The redirect programs address each
+// frame to the private end, which drops a frame for any other MAC as
+// PACKET_OTHERHOST, so that end gets an explicit address as well.
+func newTCDeliveryHardwareAddress() (net.HardwareAddr, error) {
+	address := make(net.HardwareAddr, len(commonEBPF.MACAddress{}))
+	if _, err := rand.Read(address); err != nil {
+		return nil, err
+	}
+	address[0] = address[0]&^0x01 | 0x02
+	return address, nil
+}
+
+func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
+	var address commonEBPF.MACAddress
+	hardwareAddress := link.Attrs().HardwareAddr
+	if len(hardwareAddress) != len(address) {
+		return address, false
+	}
+	copy(address[:], hardwareAddress)
+	return address, true
+}
 
 func nextTCVethNames() (string, string, error) {
 	for range 1024 {

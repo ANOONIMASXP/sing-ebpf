@@ -79,6 +79,9 @@ type tcInterfaceAttachment struct {
 	interfaceIndex int
 	framing        commonEBPF.TCLinkFraming
 	role           tcInterfaceRole
+	// slot is the interface instance slot lock holds. It keys this runtime's
+	// clsact filter names and handles on the interface.
+	slot           int
 	lock           io.Closer
 	lockOwned      bool
 	closing        bool
@@ -110,6 +113,9 @@ type tcDeliveryLink struct {
 	redirect     netlink.Link
 	delivery     netlink.Link
 	filter       *netlink.BpfFilter
+	// deliveryMAC is the private end's address programmed into the backend
+	// as every redirected frame's destination.
+	deliveryMAC commonEBPF.MACAddress
 }
 
 type tcDataPlane struct {
@@ -362,6 +368,7 @@ func (d *tcDataPlane) attachmentDiagnostics() []commonEBPF.AttachmentInfo {
 			Framing:        attachment.framing.String(),
 			Mechanism:      attachment.attachmentType,
 			ICMPEchoReply:  icmpEchoReply,
+			Slot:           attachment.slot,
 		})
 	}
 	slices.SortFunc(diagnostics, func(a, b commonEBPF.AttachmentInfo) int {
@@ -411,7 +418,8 @@ func attachTCInterfaceWithLock(
 ) (*tcInterfaceAttachment, error) {
 	attachment := &tcInterfaceAttachment{
 		interfaceName: interfaceName, interfaceIndex: state.index,
-		framing: state.framing, role: state.role, lock: interfaceLock, lockOwned: lockOwned,
+		framing: state.framing, role: state.role, slot: tcLockSlot(interfaceLock),
+		lock: interfaceLock, lockOwned: lockOwned,
 	}
 	cleanup := func(startErr error) (*tcInterfaceAttachment, error) {
 		closeErr := attachment.Close()
@@ -434,22 +442,20 @@ func attachTCInterfaceWithLock(
 	if attachment.lock == nil {
 		return nil, E.New("TC eBPF interface lock is unavailable")
 	}
-	// TCX links do not expose the numeric TC priority. Preserve the existing
-	// tc_priority contract by using TCX only with the default priority.
-	if priority == 1 {
-		if tcxSupport.Load() != tcxSupportUnavailable {
-			tcxAttachment, tcxErr := attachTCXInterface(link, backend, attachment)
-			if tcxErr == nil && tcxAttachment {
-				tcxSupport.Store(tcxSupportAvailable)
-				attachment.attachmentType = "tcx"
-				return attachment, nil
-			}
-			if attachment.hasAttachedResources() {
-				return cleanup(tcxErr)
-			}
-			if tcxUnsupportedError(tcxErr) {
-				tcxSupport.CompareAndSwap(tcxSupportUnknown, tcxSupportUnavailable)
-			}
+	// TCX keeps the priority contract through the ordered attach: sing-ebpf
+	// programs on one hook run in ascending priority order.
+	if tcxSupport.Load() != tcxSupportUnavailable {
+		tcxAttachment, tcxErr := attachTCXInterface(link, backend, attachment, priority)
+		if tcxErr == nil && tcxAttachment {
+			tcxSupport.Store(tcxSupportAvailable)
+			attachment.attachmentType = "tcx"
+			return attachment, nil
+		}
+		if attachment.hasAttachedResources() {
+			return cleanup(tcxErr)
+		}
+		if tcxUnsupportedError(tcxErr) {
+			tcxSupport.CompareAndSwap(tcxSupportUnknown, tcxSupportUnavailable)
 		}
 	}
 	if err = ensureTCClsact(link); err != nil {
@@ -457,25 +463,23 @@ func attachTCInterfaceWithLock(
 	}
 	attachment.attachmentType = "clsact"
 	if state.role.local {
-		attachment.localFilter, err = attachTCFilter(
+		attachment.localFilter, err = attachment.attachSlotFilter(
 			link,
-			netlink.HANDLE_MIN_EGRESS,
+			tcFilterRoleLocal,
 			rawTCBackend(backend).LocalEgressProgramFD(framing),
-			"sb_tc_local",
-			tcLocalFilterHandle,
 			priority,
+			attachTCFilter,
 		)
 		if err != nil {
 			return cleanup(E.Cause(err, "attach TC local egress filter on interface ", interfaceName))
 		}
 		if backend.ICMPEchoReplyEnabled() {
-			attachment.localICMPFilter, err = attachTCFilter(
+			attachment.localICMPFilter, err = attachment.attachSlotFilter(
 				link,
-				netlink.HANDLE_MIN_EGRESS,
+				tcFilterRoleLocalICMP,
 				rawTCBackend(backend).ICMPEchoLocalReplyProgramFD(framing),
-				"sb_icmp_local",
-				tcLocalICMPReplyFilterHandle,
 				priority,
+				attachTCFilter,
 			)
 			if err != nil {
 				return cleanup(E.Cause(err, "attach icmp_echo_reply local reply filter on interface ", interfaceName))
@@ -483,25 +487,23 @@ func attachTCInterfaceWithLock(
 		}
 	}
 	if state.role.shared {
-		attachment.sharedFilter, err = attachTCFilter(
+		attachment.sharedFilter, err = attachment.attachSlotFilter(
 			link,
-			netlink.HANDLE_MIN_INGRESS,
+			tcFilterRoleShared,
 			rawTCBackend(backend).SharedIngressProgramFD(framing),
-			"sb_tc_shared",
-			tcSharedFilterHandle,
 			priority,
+			attachTCFilter,
 		)
 		if err != nil {
 			return cleanup(E.Cause(err, "attach TC shared ingress filter on interface ", interfaceName))
 		}
 		if backend.ICMPEchoReplyEnabled() {
-			attachment.sharedICMPFilter, err = attachTCFilter(
+			attachment.sharedICMPFilter, err = attachment.attachSlotFilter(
 				link,
-				netlink.HANDLE_MIN_INGRESS,
+				tcFilterRoleSharedICMP,
 				rawTCBackend(backend).ICMPEchoSharedReplyProgramFD(framing),
-				"sb_icmp_shared",
-				tcSharedICMPReplyFilterHandle,
 				priority,
+				attachTCFilter,
 			)
 			if err != nil {
 				return cleanup(E.Cause(err, "attach icmp_echo_reply shared reply filter on interface ", interfaceName))
@@ -511,12 +513,24 @@ func attachTCInterfaceWithLock(
 	return attachment, nil
 }
 
+// attachSlotFilter adds the clsact filter of role under this attachment's slot.
+func (a *tcInterfaceAttachment) attachSlotFilter(
+	link netlink.Link,
+	role tcFilterRole,
+	programFD int,
+	priority uint16,
+	attachFilter func(netlink.Link, uint32, int, string, uint16, uint16) (*netlink.BpfFilter, error),
+) (*netlink.BpfFilter, error) {
+	identity := tcSlotFilter(a.slot, 0, role)
+	return attachFilter(link, identity.parent, programFD, identity.name, identity.handle, priority)
+}
+
 func tcxUnsupportedError(err error) bool {
 	return err != nil && (errors.Is(err, CiliumEBPF.ErrNotSupported) ||
 		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS))
 }
 
-func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend, attachment *tcInterfaceAttachment) (bool, error) {
+func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend, attachment *tcInterfaceAttachment, priority uint16) (bool, error) {
 	closeLinks := func(err error) (bool, error) {
 		return false, E.Errors(err, attachment.closeLinks())
 	}
@@ -542,7 +556,7 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend, 
 			continue
 		}
 		mainLink, icmpLink, err := attachTCXProgramPair(
-			linkDevice.Attrs().Index, pair.attachType, pair.program, pair.icmpProgram, icmpEchoReplyEnabled, pair.role,
+			linkDevice.Attrs().Index, pair.attachType, pair.program, pair.icmpProgram, icmpEchoReplyEnabled, pair.role, priority,
 		)
 		if err != nil {
 			return closeLinks(err)
@@ -560,11 +574,12 @@ func attachTCXProgramPair(
 	icmpProgram *CiliumEBPF.Program,
 	icmpEnabled bool,
 	role string,
+	priority uint16,
 ) (link.Link, link.Link, error) {
 	if program == nil {
 		return nil, nil, E.New("TC eBPF ", role, " program is unavailable")
 	}
-	mainLink, err := link.AttachTCX(link.TCXOptions{Interface: interfaceIndex, Program: program, Attach: attachType})
+	mainLink, err := coreAttachTCXOrdered(interfaceIndex, attachType, program, priority)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -574,7 +589,7 @@ func attachTCXProgramPair(
 	if icmpProgram == nil {
 		return nil, nil, E.Errors(E.New("icmp_echo_reply ", role, " reply program is unavailable"), mainLink.Close())
 	}
-	icmpLink, err := link.AttachTCX(link.TCXOptions{Interface: interfaceIndex, Program: icmpProgram, Attach: attachType})
+	icmpLink, err := coreAttachTCXOrdered(interfaceIndex, attachType, icmpProgram, priority)
 	if err != nil {
 		return nil, nil, E.Errors(err, mainLink.Close())
 	}
@@ -630,7 +645,7 @@ func updateTCInterfaceAttachmentWithOps(
 		return E.New("shared source MAC policy requires Ethernet framing on interface ", link.Attrs().Name)
 	}
 	if attachment.attachmentType == "tcx" {
-		return updateTCXInterfaceAttachment(link, backend, attachment, role)
+		return updateTCXInterfaceAttachment(link, backend, attachment, role, priority)
 	}
 	if attachment.localLink != nil || attachment.sharedLink != nil {
 		return E.New("TC eBPF interface has an inconsistent attachment type")
@@ -660,13 +675,12 @@ func updateTCInterfaceAttachmentWithOps(
 		return E.Errors(startErr, rollbackErr)
 	}
 	if role.local && attachment.localFilter == nil {
-		attachment.localFilter, err = ops.attachFilter(
+		attachment.localFilter, err = attachment.attachSlotFilter(
 			link,
-			netlink.HANDLE_MIN_EGRESS,
+			tcFilterRoleLocal,
 			rawTCBackend(backend).LocalEgressProgramFD(attachment.framing),
-			"sb_tc_local",
-			tcLocalFilterHandle,
 			priority,
+			ops.attachFilter,
 		)
 		if err != nil {
 			return E.Cause(err, "attach TC local egress filter on interface ", attachment.interfaceName)
@@ -674,13 +688,12 @@ func updateTCInterfaceAttachmentWithOps(
 		addedLocal = true
 	}
 	if role.local && backend.ICMPEchoReplyEnabled() && attachment.localICMPFilter == nil {
-		attachment.localICMPFilter, err = ops.attachFilter(
+		attachment.localICMPFilter, err = attachment.attachSlotFilter(
 			link,
-			netlink.HANDLE_MIN_EGRESS,
+			tcFilterRoleLocalICMP,
 			rawTCBackend(backend).ICMPEchoLocalReplyProgramFD(attachment.framing),
-			"sb_icmp_local",
-			tcLocalICMPReplyFilterHandle,
 			priority,
+			ops.attachFilter,
 		)
 		if err != nil {
 			return rollbackAdded(E.Cause(err, "attach icmp_echo_reply local reply filter on interface ", attachment.interfaceName))
@@ -688,13 +701,12 @@ func updateTCInterfaceAttachmentWithOps(
 		addedLocalICMP = true
 	}
 	if role.shared && attachment.sharedFilter == nil {
-		attachment.sharedFilter, err = ops.attachFilter(
+		attachment.sharedFilter, err = attachment.attachSlotFilter(
 			link,
-			netlink.HANDLE_MIN_INGRESS,
+			tcFilterRoleShared,
 			rawTCBackend(backend).SharedIngressProgramFD(attachment.framing),
-			"sb_tc_shared",
-			tcSharedFilterHandle,
 			priority,
+			ops.attachFilter,
 		)
 		if err != nil {
 			return rollbackAdded(E.Cause(err, "attach TC shared ingress filter on interface ", attachment.interfaceName))
@@ -702,13 +714,12 @@ func updateTCInterfaceAttachmentWithOps(
 		addedShared = true
 	}
 	if role.shared && backend.ICMPEchoReplyEnabled() && attachment.sharedICMPFilter == nil {
-		attachment.sharedICMPFilter, err = ops.attachFilter(
+		attachment.sharedICMPFilter, err = attachment.attachSlotFilter(
 			link,
-			netlink.HANDLE_MIN_INGRESS,
+			tcFilterRoleSharedICMP,
 			rawTCBackend(backend).ICMPEchoSharedReplyProgramFD(attachment.framing),
-			"sb_icmp_shared",
-			tcSharedICMPReplyFilterHandle,
 			priority,
+			ops.attachFilter,
 		)
 		if err != nil {
 			return rollbackAdded(E.Cause(err, "attach icmp_echo_reply shared reply filter on interface ", attachment.interfaceName))
@@ -748,6 +759,7 @@ func updateTCXInterfaceAttachment(
 	backend *commonEBPF.TCBackend,
 	attachment *tcInterfaceAttachment,
 	role tcInterfaceRole,
+	priority uint16,
 ) error {
 	attach := func(local bool) error {
 		program := rawTCBackend(backend).SharedIngressProgram(attachment.framing)
@@ -769,11 +781,7 @@ func updateTCXInterfaceAttachment(
 		added := false
 		if attached == nil {
 			var err error
-			attached, err = link.AttachTCX(link.TCXOptions{
-				Interface: linkDevice.Attrs().Index,
-				Program:   program,
-				Attach:    attachType,
-			})
+			attached, err = coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, program, priority)
 			if err != nil {
 				return err
 			}
@@ -806,11 +814,7 @@ func updateTCXInterfaceAttachment(
 				}
 				return startErr
 			}
-			icmpAttached, err := link.AttachTCX(link.TCXOptions{
-				Interface: linkDevice.Attrs().Index,
-				Program:   icmpProgram,
-				Attach:    attachType,
-			})
+			icmpAttached, err := coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, icmpProgram, priority)
 			if err != nil {
 				if added {
 					return E.Errors(err, closeTCXRoleLink(attachment, local))

@@ -3,7 +3,10 @@
 package core
 
 import (
+	"encoding/binary"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +14,7 @@ import (
 
 	CiliumEBPF "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
+	"github.com/sagernet/sing/common/control"
 	"golang.org/x/sys/unix"
 )
 
@@ -72,9 +76,9 @@ func TestProcessCgroupExclusiveRejectsPopulatedDescendant(t *testing.T) {
 
 func TestSelfBypassInstructionsUseSocketCookie(t *testing.T) {
 	for name, instructions := range map[string]asm.Instructions{
-		"create":      selfBypassCreateInstructions(1),
+		"create":      selfBypassCreateInstructions(1, 1),
 		"release":     selfBypassReleaseInstructions(1),
-		"socket_addr": selfBypassSocketAddrInstructions(1),
+		"socket_addr": selfBypassSocketAddrInstructions(1, 1),
 	} {
 		found := false
 		for _, instruction := range instructions {
@@ -86,6 +90,67 @@ func TestSelfBypassInstructionsUseSocketCookie(t *testing.T) {
 		if !found {
 			t.Fatalf("%s self-bypass instructions do not read the socket cookie", name)
 		}
+	}
+}
+
+func TestSelfBypassMarkingInstructionsCheckOwner(t *testing.T) {
+	const owner = 4242
+	for name, instructions := range map[string]asm.Instructions{
+		"create":      selfBypassCreateInstructions(1, owner),
+		"socket_addr": selfBypassSocketAddrInstructions(1, owner),
+	} {
+		pidIndex, cookieIndex, ownerJump := -1, -1, false
+		for index, instruction := range instructions {
+			if instruction.IsBuiltinCall() {
+				switch asm.BuiltinFunc(instruction.Constant) {
+				case asm.FnGetCurrentPidTgid:
+					if pidIndex < 0 {
+						pidIndex = index
+					}
+				case asm.FnGetSocketCookie:
+					if cookieIndex < 0 {
+						cookieIndex = index
+					}
+				}
+			}
+			if instruction.OpCode.JumpOp() == asm.JNE && instruction.Constant == owner && instruction.Reference() == "allow" {
+				ownerJump = true
+			}
+		}
+		if pidIndex < 0 || cookieIndex < 0 || pidIndex > cookieIndex || !ownerJump {
+			t.Fatalf("%s self-bypass instructions do not skip sockets of other processes: pid=%d cookie=%d jump=%v", name, pidIndex, cookieIndex, ownerJump)
+		}
+		if first := instructions[0]; first.OpCode.ALUOp() != asm.Mov || first.Dst != asm.R6 || first.Src != asm.R1 {
+			t.Fatalf("%s self-bypass instructions do not preserve the context: %v", name, first)
+		}
+		if restore := instructions[cookieIndex-1]; restore.OpCode.ALUOp() != asm.Mov || restore.Dst != asm.R1 || restore.Src != asm.R6 {
+			t.Fatalf("%s self-bypass instructions do not restore the context before the cookie helper: %v", name, restore)
+		}
+		if err := instructions.Marshal(io.Discard, binary.LittleEndian); err != nil {
+			t.Fatalf("%s self-bypass instructions do not assemble: %v", name, err)
+		}
+	}
+	for _, instruction := range selfBypassReleaseInstructions(1) {
+		if instruction.IsBuiltinCall() && asm.BuiltinFunc(instruction.Constant) == asm.FnGetCurrentPidTgid {
+			t.Fatal("release instructions must delete any registered cookie regardless of the releasing task")
+		}
+	}
+}
+
+func TestSelfBypassOwnerTGID(t *testing.T) {
+	namespace, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		t.Skipf("PID namespace is not readable: %v", err)
+	}
+	owner, err := selfBypassOwnerTGID()
+	if namespace != initialPIDNamespaceLink {
+		if err == nil {
+			t.Fatalf("owner %d accepted outside the initial PID namespace (%s)", owner, namespace)
+		}
+		return
+	}
+	if err != nil || owner != uint32(os.Getpid()) {
+		t.Fatalf("owner = %d, %v; want %d", owner, err, os.Getpid())
 	}
 }
 
@@ -141,5 +206,106 @@ func TestSelfBypassModes(t *testing.T) {
 		if bypass.CgroupAttached() != test.cgroupAttach {
 			t.Fatalf("mode %s cgroup attached = %v, want %v", test.name, bypass.CgroupAttached(), test.cgroupAttach)
 		}
+	}
+}
+
+// Consumers construct SelfBypass while building a configuration, which also
+// happens in unprivileged configuration checks. Construction must therefore
+// not create kernel objects.
+func TestNewSelfBypassCreatesNoKernelObject(t *testing.T) {
+	bypass, err := NewSelfBypassWithCapacity(CompactSelfBypassSocketCapacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bypass.Map() != nil {
+		t.Fatal("constructor created the socket-cookie map")
+	}
+	if bypass.IsClosed() {
+		t.Fatal("an unprepared self-bypass reported itself closed")
+	}
+	if err = bypass.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !bypass.IsClosed() {
+		t.Fatal("self-bypass remained open after Close")
+	}
+	if _, err = bypass.PreparedMap(); !errors.Is(err, errSelfBypassClosed) {
+		t.Fatalf("prepare after close = %v, want errSelfBypassClosed", err)
+	}
+	if err = bypass.RegisterSocket(nil); err != nil {
+		t.Fatalf("register after close = %v, want nil", err)
+	}
+}
+
+func TestNewSelfBypassRejectsInvalidCapacity(t *testing.T) {
+	for _, capacity := range []uint32{0, MaxConfigurableMapCapacity + 1} {
+		if _, err := NewSelfBypassWithCapacity(capacity); err == nil {
+			t.Fatalf("capacity %d was accepted", capacity)
+		}
+	}
+}
+
+func preparedTestSelfBypass(t *testing.T) *SelfBypass {
+	t.Helper()
+	bypass, err := NewSelfBypassWithCapacity(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bypass.Close() })
+	return bypass
+}
+
+func TestSelfBypassPreparedMapIsStable(t *testing.T) {
+	bypass := preparedTestSelfBypass(t)
+	first, err := bypass.PreparedMap()
+	if err != nil {
+		t.Skipf("BPF maps are unavailable here: %v", err)
+	}
+	second, err := bypass.PreparedMap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || bypass.Map() != first {
+		t.Fatal("the socket-cookie map was created more than once")
+	}
+}
+
+// A socket created before any data plane prepared the map must still be
+// registered, in the same map the data plane later shares.
+func TestSelfBypassRegisterSocketCreatesMap(t *testing.T) {
+	bypass := preparedTestSelfBypass(t)
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	rawConn, err := conn.(*net.UDPConn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = bypass.RegisterSocket(rawConn); err != nil {
+		if errors.Is(err, unix.EPERM) {
+			t.Skipf("BPF maps are unavailable here: %v", err)
+		}
+		t.Fatal(err)
+	}
+	sockets := bypass.Map()
+	if sockets == nil {
+		t.Fatal("registration did not create the socket-cookie map")
+	}
+	shared, err := bypass.PreparedMap()
+	if err != nil || shared != sockets {
+		t.Fatalf("data plane would receive a different map: %v", err)
+	}
+	var cookie uint64
+	if err = control.Raw(rawConn, func(fd uintptr) error {
+		cookie, err = unix.GetsockoptUint64(int(fd), unix.SOL_SOCKET, unix.SO_COOKIE)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var value uint32
+	if err = sockets.Lookup(&cookie, &value); err != nil || value != 1 {
+		t.Fatalf("registered socket missing from the map: value=%d err=%v", value, err)
 	}
 }

@@ -54,13 +54,16 @@ var cgroupProgramDefinitions = [cgroupProgramCount]cgroupProgramDefinition{
 }
 
 type cgroupRuntime struct {
-	cgroupFile                  *os.File
-	maps                        map[string]*CiliumEBPF.Map
-	programs                    []*CiliumEBPF.Program
-	links                       [cgroupProgramCount]link.Link
-	attached                    [cgroupProgramCount]bool
-	attach_modes                [cgroupProgramCount]string
-	displaced                   [cgroupProgramCount]*displacedCgroupOwner // netd placeholders replaced by legacy attachments; detach puts them back
+	cgroupFile   *os.File
+	slot         *InstanceSlot
+	maps         map[string]*CiliumEBPF.Map
+	programs     []*CiliumEBPF.Program
+	links        [cgroupProgramCount]link.Link
+	attached     [cgroupProgramCount]bool
+	attach_modes [cgroupProgramCount]string
+	// displaced holds, per legacy attachment, the netd placeholder it
+	// replaced on a single-program hook; detach puts it back.
+	displaced                   [cgroupProgramCount]*displacedCgroupOwner
 	control_map_fd              int
 	tcp_redirect_map_fd         int
 	udp_redirect_map_fd         int
@@ -192,13 +195,35 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 	if err != nil {
 		return nil, eBPFOperationError("open cgroup", err)
 	}
-	if err = lockCgroupFile(cgroupFile); err != nil {
+	slot, err := acquireCgroupSlot(cgroupFile)
+	if err != nil {
 		_ = cgroupFile.Close()
 		return nil, err
 	}
-	if err = detachOwnedCgroupPrograms(int(cgroupFile.Fd())); err != nil {
+	closeCgroup := func() {
 		_ = cgroupFile.Close()
+		_ = slot.Close()
+	}
+	exclusive, err := lockCgroupFile(cgroupFile)
+	if err != nil {
+		closeCgroup()
+		return nil, err
+	}
+	reclaimSlot := slot.Index()
+	if exclusive {
+		reclaimSlot = cgroupReclaimAllSlots
+	} else if cgroupSharedAcrossNetworkNamespaces(cgroupFile) {
+		reclaimSlot = cgroupReclaimNoSlot
+	}
+	if err = detachOwnedCgroupPrograms(int(cgroupFile.Fd()), reclaimSlot); err != nil {
+		closeCgroup()
 		return nil, eBPFOperationError("detach stale cgroup programs", err)
+	}
+	if exclusive {
+		if err = shareCgroupLock(cgroupFile); err != nil {
+			closeCgroup()
+			return nil, err
+		}
 	}
 	socketReleaseSupported := false
 	coarseTimeSupported := false
@@ -206,12 +231,13 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 		coarseTimeSupported = features.HaveProgramHelper(CiliumEBPF.CGroupSockAddr, asm.FnKtimeGetCoarseNs) == nil
 		socketReleaseSupported, err = probeSocketReleaseSupport(int(cgroupFile.Fd()))
 		if err != nil {
-			_ = cgroupFile.Close()
+			closeCgroup()
 			return nil, eBPFOperationError("probe socket release attachment", err)
 		}
 	}
 	runtimeState := &cgroupRuntime{
 		cgroupFile:               cgroupFile,
+		slot:                     slot,
 		maps:                     make(map[string]*CiliumEBPF.Map),
 		programs:                 make([]*CiliumEBPF.Program, cgroupProgramCount),
 		enable_tcp:               config.EnableTCP,
@@ -226,8 +252,10 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 	}
 	if err = prepareCgroupMaps(runtimeState, mapCapacity, len(uidPolicyEntries), len(policy.localBypassPortEntries), config.SelfBypassMap, policy.localForce); err != nil {
 		_ = closeMaps(runtimeState.maps)
-		_ = runtimeState.cgroupFile.Close()
-		if memlockErr != nil && (errors.Is(err, unix.ENOMEM) || errors.Is(err, unix.EPERM)) {
+		closeCgroup()
+		if errors.Is(err, unix.EPERM) {
+			err = explainBPFPermissionError(err, memlockErr)
+		} else if memlockErr != nil && errors.Is(err, unix.ENOMEM) {
 			err = E.Errors(err, E.Cause(memlockErr, "remove memlock limit"))
 		}
 		return nil, err

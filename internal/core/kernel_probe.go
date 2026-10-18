@@ -83,7 +83,7 @@ func probeCommonCapabilities(report *KernelProbeReport, memlockErr error, plan k
 			name   string
 			detail string
 		}{
-			{asm.FnSkbPullData, "bpf_skb_pull_data", "Ensures packet headers are linear before tuple rewriting."},
+			{asm.FnSkbPullData, "bpf_skb_pull_data", "Pulls packet headers a driver left in page fragments into the linear area."},
 			{asm.FnSkbLoadBytes, "bpf_skb_load_bytes", "Reads UDP checksums without assuming linear packet data."},
 			{asm.FnCsumDiff, "bpf_csum_diff", "Recomputes checksums after packet tuple rewriting."},
 			{asm.FnL3CsumReplace, "bpf_l3_csum_replace", "Updates IPv4 checksums after packet tuple rewriting."},

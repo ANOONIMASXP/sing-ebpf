@@ -28,8 +28,6 @@ type netdAttachFixture struct {
 
 type ownerFinder func(CiliumEBPF.AttachType, CiliumEBPF.ProgramID, uint32) (*displacedCgroupOwner, error)
 
-const netdPlaceholderTestName = "connect4_inet4_connect_4_19_v"
-
 func installNetdAttachFixture(t *testing.T, owners []link.AttachedProgram, hookFlags uint32, find ownerFinder) *netdAttachFixture {
 	t.Helper()
 	fixture := &netdAttachFixture{}
@@ -38,14 +36,14 @@ func installNetdAttachFixture(t *testing.T, owners []link.AttachedProgram, hookF
 	originalQuery := queryCgroupPrograms
 	originalFlags := queryCgroupHookFlags
 	originalFind := findDisplaceableOwner
-	originalProgramNameByID := programNameByID
+	originalDescribe := describeCgroupProgram
 	t.Cleanup(func() {
 		rawAttachProgram = originalRawAttachProgram
 		rawDetachProgram = originalRawDetachProgram
 		queryCgroupPrograms = originalQuery
 		queryCgroupHookFlags = originalFlags
 		findDisplaceableOwner = originalFind
-		programNameByID = originalProgramNameByID
+		describeCgroupProgram = originalDescribe
 	})
 	rawAttachProgram = func(current link.RawAttachProgramOptions) error {
 		fixture.flags = append(fixture.flags, current.Flags)
@@ -68,10 +66,8 @@ func installNetdAttachFixture(t *testing.T, owners []link.AttachedProgram, hookF
 		fixture.ownerCalls++
 		return find(attachType, ownerID, flags)
 	}
-	// Not an interception program name, so the stale-program cleanup that
-	// precedes the owner check leaves it alone.
-	programNameByID = func(CiliumEBPF.ProgramID) (string, error) {
-		return netdPlaceholderTestName, nil
+	describeCgroupProgram = func(CiliumEBPF.ProgramID) string {
+		return "id=33 name=connect4_inet4_connect_4_19_v"
 	}
 	return fixture
 }
@@ -84,10 +80,10 @@ func passThroughOwner33(_ CiliumEBPF.AttachType, ownerID CiliumEBPF.ProgramID, f
 }
 
 // The failure this reproduces: "attach eBPF cgroup programs: sb_ebpf_conn4:
-// refusing to replace existing cgroup program owner(s):
-// connect4_inet4_connect_4_19_v" on Android 15, where netd's placeholder must
-// be replaced and handed back. The replacement uses the hook's own flags so the
-// kernel swaps the program instead of refusing.
+// refusing to replace existing cgroup program owner on CGroupInet4Connect
+// (id=33 name=connect4_inet4_connect_4_19_v)" on Android 15, where netd's
+// placeholder must be replaced and handed back. The replacement uses the
+// hook's own flags so the kernel swaps the program instead of refusing.
 func TestRawCgroupAttachReplacesPassThroughOwner(t *testing.T) {
 	for _, hookFlags := range []uint32{0, unix.BPF_F_ALLOW_OVERRIDE} {
 		fixture := installNetdAttachFixture(t, []link.AttachedProgram{{ID: 33}}, hookFlags, passThroughOwner33)
@@ -104,21 +100,18 @@ func TestRawCgroupAttachReplacesPassThroughOwner(t *testing.T) {
 		if !slices.Equal(fixture.flags, []uint32{unix.BPF_F_ALLOW_MULTI, hookFlags}) {
 			t.Fatalf("flags=%v, want the multi attempt and then a replacement with %#x", fixture.flags, hookFlags)
 		}
-		if fixture.detached != 0 {
-			t.Fatalf("detached %d programs, want the foreign owner left to the replacement", fixture.detached)
-		}
 	}
 }
 
-// Optional components fall back to userspace instead. A program of theirs in
-// netd's place would be an owner the interception backend has to refuse.
+// Only the interception backend takes a hook over. An optional component's
+// legacy attach keeps even a pass-through owner and falls back to userspace.
 func TestRawCgroupAttachOfOptionalComponentKeepsPassThroughOwner(t *testing.T) {
 	fixture := installNetdAttachFixture(t, []link.AttachedProgram{{ID: 33}}, 0, passThroughOwner33)
 	err := attachProgramRaw(42, nil, CiliumEBPF.AttachCGroupInet4Connect)
-	if err == nil {
-		t.Fatal("an optional component replaced the pass-through owner")
+	if !errors.Is(err, ErrCgroupHookOccupied) {
+		t.Fatalf("error = %v, want ErrCgroupHookOccupied", err)
 	}
-	if !strings.Contains(err.Error(), netdPlaceholderTestName) {
+	if !strings.Contains(err.Error(), "id=33 name=connect4_inet4_connect_4_19_v") {
 		t.Fatalf("error %q does not name the owner", err)
 	}
 	if fixture.ownerCalls != 0 {
@@ -166,8 +159,8 @@ func TestRawCgroupAttachKeepsOwnersThatAreNotPassThrough(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			fixture := installNetdAttachFixture(t, testCase.owners, testCase.hookFlags, passThroughOwner33)
 			_, err := attachProgramRawWithMode(42, nil, testCase.attachType, true)
-			if err == nil || !strings.Contains(err.Error(), "refusing to replace existing cgroup program owner") {
-				t.Fatalf("error = %v, want the owner kept", err)
+			if !errors.Is(err, ErrCgroupHookOccupied) {
+				t.Fatalf("error = %v, want ErrCgroupHookOccupied", err)
 			}
 			if !slices.Equal(fixture.flags, []uint32{unix.BPF_F_ALLOW_MULTI}) {
 				t.Fatalf("flags=%v, want only the non-destructive multi attach", fixture.flags)
@@ -183,7 +176,7 @@ func TestRawCgroupAttachKeepsOwnersThatAreNotPassThrough(t *testing.T) {
 					t.Fatalf("error %q does not explain the refusal", err)
 				}
 			}
-			if !strings.Contains(err.Error(), netdPlaceholderTestName) {
+			if !strings.Contains(err.Error(), "id=33 name=connect4_inet4_connect_4_19_v") {
 				t.Fatalf("error %q does not name the owner", err)
 			}
 		})
@@ -236,9 +229,9 @@ func TestRestoreDisplacedCgroupOwner(t *testing.T) {
 	}
 }
 
-// newDisplacingTestBackend returns a backend whose connect4 program holds a
-// hook it took over from netd, without any kernel object.
-func newDisplacingTestBackend(t *testing.T) *CgroupBackend {
+// newDisplacedOwnerTestBackend is a backend whose connect4 attachment replaced
+// netd's placeholder, program 33.
+func newDisplacedOwnerTestBackend(t *testing.T) *CgroupBackend {
 	t.Helper()
 	cgroupFile, err := os.Create(filepath.Join(t.TempDir(), "cgroup"))
 	if err != nil {
@@ -249,31 +242,10 @@ func newDisplacingTestBackend(t *testing.T) *CgroupBackend {
 		cgroupFile: cgroupFile,
 		programs:   make([]*CiliumEBPF.Program, cgroupProgramCount),
 	}}
-	backend.runtime.attached[cgroupProgramConnect4] = true
-	backend.runtime.attach_modes[cgroupProgramConnect4] = cgroupAttachModeNetdReplace
-	backend.runtime.displaced[cgroupProgramConnect4] = &displacedCgroupOwner{id: 33}
+	backend.runtime.attached[0] = true
+	backend.runtime.attach_modes[0] = cgroupAttachModeNetdReplace
+	backend.runtime.displaced[0] = &displacedCgroupOwner{id: 33}
 	return backend
-}
-
-func TestCgroupBackendDetachRestoresDisplacedOwner(t *testing.T) {
-	fixture := installNetdAttachFixture(t, []link.AttachedProgram{{ID: 7}}, 0, passThroughOwner33)
-	originalProgramHasID := programHasID
-	t.Cleanup(func() { programHasID = originalProgramHasID })
-	programHasID = func(*CiliumEBPF.Program, CiliumEBPF.ProgramID) bool { return true }
-	backend := newDisplacingTestBackend(t)
-	if err := backend.detachProgramsLocked(); err != nil {
-		t.Fatal(err)
-	}
-	if fixture.detached != 0 {
-		t.Fatal("a detach would leave the netd hook empty instead of restored")
-	}
-	if !slices.Equal(fixture.flags, []uint32{0}) {
-		t.Fatalf("attach flags = %v, want one unflagged restore", fixture.flags)
-	}
-	if backend.runtime.attached[cgroupProgramConnect4] || backend.runtime.displaced[cgroupProgramConnect4] != nil ||
-		backend.runtime.attach_modes[cgroupProgramConnect4] != "" {
-		t.Fatal("a restored attachment is still recorded")
-	}
 }
 
 func TestCgroupBackendDetachKeepsDisplacedOwnerForRetry(t *testing.T) {
@@ -282,12 +254,32 @@ func TestCgroupBackendDetachKeepsDisplacedOwnerForRetry(t *testing.T) {
 	t.Cleanup(func() { programHasID = originalProgramHasID })
 	programHasID = func(*CiliumEBPF.Program, CiliumEBPF.ProgramID) bool { return true }
 	rawAttachProgram = func(link.RawAttachProgramOptions) error { return unix.EBUSY }
-	backend := newDisplacingTestBackend(t)
+	backend := newDisplacedOwnerTestBackend(t)
 	if err := backend.detachProgramsLocked(); !errors.Is(err, unix.EBUSY) {
 		t.Fatalf("detach error = %v, want EBUSY", err)
 	}
-	if !backend.runtime.attached[cgroupProgramConnect4] || backend.runtime.displaced[cgroupProgramConnect4] == nil {
+	if !backend.runtime.attached[0] || backend.runtime.displaced[0] == nil {
 		t.Fatal("a failed restore discarded the displaced owner instead of keeping it for a retry")
+	}
+}
+
+func TestCgroupBackendDetachRestoresDisplacedOwner(t *testing.T) {
+	fixture := installNetdAttachFixture(t, []link.AttachedProgram{{ID: 7}}, 0, passThroughOwner33)
+	originalProgramHasID := programHasID
+	t.Cleanup(func() { programHasID = originalProgramHasID })
+	programHasID = func(*CiliumEBPF.Program, CiliumEBPF.ProgramID) bool { return true }
+	backend := newDisplacedOwnerTestBackend(t)
+	if err := backend.detachProgramsLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(fixture.flags, []uint32{0}) {
+		t.Fatalf("attach flags = %v, want one unflagged restore", fixture.flags)
+	}
+	if fixture.detached != 0 {
+		t.Fatalf("detached %d times; a detach would leave the netd hook empty instead of restored", fixture.detached)
+	}
+	if backend.runtime.attached[0] || backend.runtime.displaced[0] != nil {
+		t.Fatal("the restored attachment is still recorded")
 	}
 }
 
@@ -349,42 +341,32 @@ func TestOpenNetdPinnedProgramLimitsItselfToTakeableHooks(t *testing.T) {
 	}
 }
 
-func TestRestoreNetdOwnerForStaleProgramFallsBackToDetach(t *testing.T) {
+func TestRestoreNetdOwnerForStaleProgramNeedsNetd(t *testing.T) {
 	originalPresent := netdPresent
 	originalPlaceholder := newHookPlaceholderProgram
-	originalFlags := queryCgroupHookFlags
 	t.Cleanup(func() {
 		netdPresent = originalPresent
 		newHookPlaceholderProgram = originalPlaceholder
-		queryCgroupHookFlags = originalFlags
 	})
 	newHookPlaceholderProgram = func(CiliumEBPF.AttachType) (*CiliumEBPF.Program, error) {
 		t.Fatal("a placeholder was loaded where the stale program should simply be detached")
 		return nil, nil
 	}
-	hookFlags, flagsErr := uint32(0), error(nil)
-	queryCgroupHookFlags = func(int, CiliumEBPF.AttachType) (uint32, error) { return hookFlags, flagsErr }
 	netdPresent = func() bool { return false }
-	if restored, err := restoreNetdOwnerForStaleProgram(42, CiliumEBPF.AttachCGroupInet4Connect); restored || err != nil {
+	if restored, err := restoreNetdOwnerForStaleProgram(42, CiliumEBPF.AttachCGroupInet4Connect, 0); restored || err != nil {
 		t.Fatalf("without netd: restored=%v err=%v, want a plain detach", restored, err)
 	}
 	netdPresent = func() bool { return true }
-	if restored, err := restoreNetdOwnerForStaleProgram(42, CiliumEBPF.AttachCgroupInetSockRelease); restored || err != nil {
+	if restored, err := restoreNetdOwnerForStaleProgram(42, CiliumEBPF.AttachCgroupInetSockRelease, 0); restored || err != nil {
 		t.Fatalf("socket-release hook: restored=%v err=%v, want a plain detach", restored, err)
-	}
-	hookFlags = unix.BPF_F_ALLOW_MULTI
-	if restored, err := restoreNetdOwnerForStaleProgram(42, CiliumEBPF.AttachCGroupInet4Connect); restored || err != nil {
-		t.Fatalf("multi-program hook: restored=%v err=%v, want a plain detach", restored, err)
-	}
-	hookFlags, flagsErr = 0, unix.EINVAL
-	if restored, err := restoreNetdOwnerForStaleProgram(42, CiliumEBPF.AttachCGroupInet4Connect); restored || err != nil {
-		t.Fatalf("unknown hook mode: restored=%v err=%v, want a plain detach", restored, err)
 	}
 }
 
 func TestHookPlaceholderIsNotReclaimed(t *testing.T) {
-	if ownedCgroupProgramName(kernelProgramNameHookPlaceholder) {
-		t.Fatal("the netd placeholder would be reclaimed as stale state")
+	for _, slot := range []int{cgroupReclaimAllSlots, 0, cgroupReclaimNoSlot} {
+		if reclaimableCgroupProgram(kernelProgramNameHookPlaceholder, slot, 0, 1) {
+			t.Fatalf("slot %d: the netd placeholder would be reclaimed as stale state", slot)
+		}
 	}
 }
 

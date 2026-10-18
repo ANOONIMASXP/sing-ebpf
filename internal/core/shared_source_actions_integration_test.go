@@ -35,7 +35,7 @@ func testSharedSourceActions(t *testing.T, assignment bool) {
 					}
 					scope := ActionScope{Default: defaultAction}
 					if rules {
-						scope.SourceCIDR = []CIDRDecision{{netip.MustParsePrefix(include), DecisionIntercept}, {netip.MustParsePrefix(exclude), DecisionPass}}
+						scope.SourceCIDR = []CIDRDecision{{Prefix: netip.MustParsePrefix(include), Action: DecisionIntercept}, {Prefix: netip.MustParsePrefix(exclude), Action: DecisionPass}}
 						scope.SourceMAC = []MACDecision{{MACAddress{2, 0, 0, 0, 0, 1}, DecisionIntercept}, {MACAddress{2, 0, 0, 0, 0, 3}, DecisionPass}}
 					}
 					policy, err := CompileActionPolicy(ActionPolicy{Shared: scope})

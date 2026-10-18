@@ -152,7 +152,9 @@ func PrepareSharedPacketRewrite(config SharedPacketRewriteConfig) (*SharedPacket
 			verifierErrorStage(err),
 			err,
 		)
-		if memlockErr != nil && (errors.Is(err, unix.ENOMEM) || errors.Is(err, unix.EPERM)) {
+		if errors.Is(err, unix.EPERM) {
+			prepareErr = explainBPFPermissionError(prepareErr, memlockErr)
+		} else if memlockErr != nil && errors.Is(err, unix.ENOMEM) {
 			prepareErr = E.Errors(prepareErr, E.Cause(memlockErr, "remove memlock limit"))
 		}
 		return nil, prepareErr
@@ -232,7 +234,8 @@ func PrepareSharedPacketRewrite(config SharedPacketRewriteConfig) (*SharedPacket
 	}
 	if config.ICMPEchoReply {
 		backend.icmpEchoReply, err = PrepareICMPEchoReply(
-			redirectIPv4.IsValid(), false, redirectIPv6.IsValid(), CompiledPolicy{sharedForce: policy.sharedForce},
+			redirectIPv4.IsValid(), false, redirectIPv6.IsValid(),
+			CompiledPolicy{sharedForce: policy.sharedForce, sharedEchoReply: policy.sharedEchoReply},
 		)
 		if err != nil {
 			_ = backend.Close()

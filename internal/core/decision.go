@@ -27,6 +27,12 @@ func (d Decision) Valid() bool {
 type CIDRDecision struct {
 	Prefix netip.Prefix
 	Action Decision
+	// EchoReply limits ICMP echo reply to the intercept destination prefixes
+	// that set it, for example a FakeIP range intercepted beside a VPN range
+	// whose hosts are real. When no intercept decision of a scope and address
+	// family sets it, ICMP echo reply answers every intercept prefix of that
+	// family. It is valid only on intercept destination decisions.
+	EchoReply bool
 }
 
 // PortDecision is a protocol/port match with an already compiled final

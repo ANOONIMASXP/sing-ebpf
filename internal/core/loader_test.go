@@ -4,6 +4,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -80,11 +81,11 @@ func TestRawCgroupAttachFallsBackToExclusiveAfterMultiCompatibilityError(t *test
 func TestRawCgroupAttachPreservesExistingOwner(t *testing.T) {
 	originalRawAttachProgram := rawAttachProgram
 	originalQuery := queryCgroupPrograms
-	originalProgramNameByID := programNameByID
+	originalDescribe := describeCgroupProgram
 	t.Cleanup(func() {
 		rawAttachProgram = originalRawAttachProgram
 		queryCgroupPrograms = originalQuery
-		programNameByID = originalProgramNameByID
+		describeCgroupProgram = originalDescribe
 	})
 	var flags []uint32
 	rawAttachProgram = func(current link.RawAttachProgramOptions) error {
@@ -97,7 +98,7 @@ func TestRawCgroupAttachPreservesExistingOwner(t *testing.T) {
 	queryCgroupPrograms = func(link.QueryOptions) (*link.QueryResult, error) {
 		return &link.QueryResult{Programs: []link.AttachedProgram{{ID: 1}}}, nil
 	}
-	programNameByID = func(CiliumEBPF.ProgramID) (string, error) { return "netd_conn4", nil }
+	describeCgroupProgram = func(CiliumEBPF.ProgramID) string { return "id=1 name=netd_conn4" }
 	err := attachProgramRaw(42, nil, CiliumEBPF.AttachCGroupInet4Connect)
 	if err == nil {
 		t.Fatal("existing cgroup owner was replaced")
@@ -107,6 +108,46 @@ func TestRawCgroupAttachPreservesExistingOwner(t *testing.T) {
 	}
 	if !slices.Equal(flags, []uint32{unix.BPF_F_ALLOW_MULTI}) {
 		t.Fatalf("flags=%v, want only the non-destructive multi attach", flags)
+	}
+}
+
+func TestRawCgroupAttachOccupiedErrorNamesOwners(t *testing.T) {
+	originalRawAttachProgram := rawAttachProgram
+	originalQuery := queryCgroupPrograms
+	originalDescribe := describeCgroupProgram
+	t.Cleanup(func() {
+		rawAttachProgram = originalRawAttachProgram
+		queryCgroupPrograms = originalQuery
+		describeCgroupProgram = originalDescribe
+	})
+	rawAttachProgram = func(current link.RawAttachProgramOptions) error {
+		if current.Flags != unix.BPF_F_ALLOW_MULTI {
+			t.Fatalf("occupied hook received destructive attach flags %#x", current.Flags)
+		}
+		return unix.EPERM
+	}
+	queryCgroupPrograms = func(link.QueryOptions) (*link.QueryResult, error) {
+		return &link.QueryResult{Programs: []link.AttachedProgram{{ID: 57}}}, nil
+	}
+	describeCgroupProgram = func(id CiliumEBPF.ProgramID) string {
+		if id != 57 {
+			t.Fatalf("described program %d, want 57", id)
+		}
+		return "id=57 name=foreign_conn4"
+	}
+	err := attachProgramRaw(42, nil, CiliumEBPF.AttachCGroupInet4Connect)
+	if !errors.Is(err, ErrCgroupHookOccupied) {
+		t.Fatalf("error = %v, want ErrCgroupHookOccupied", err)
+	}
+	for _, want := range []string{"refusing to replace existing cgroup program owner", "CGroupInet4Connect", "id=57 name=foreign_conn4"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err, want)
+		}
+	}
+	// The backend wraps the error; the sentinel must survive that wrapping.
+	wrapped := eBPFBackendOperationError("attach eBPF cgroup programs", kernelProgramNameCgroupConnect4, err)
+	if !errors.Is(wrapped, ErrCgroupHookOccupied) {
+		t.Fatalf("wrapped error lost ErrCgroupHookOccupied: %v", wrapped)
 	}
 }
 
@@ -402,5 +443,22 @@ func TestKernelProgramNames(t *testing.T) {
 			t.Fatalf("duplicate kernel program name: %s", name)
 		}
 		seen[name] = struct{}{}
+	}
+}
+
+func TestVerifierLogRetryMaskedError(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "rejected log buffer", err: fmt.Errorf("program p: %w", &CiliumEBPF.VerifierError{Cause: unix.EINVAL}), want: true},
+		{name: "verifier rejection", err: &CiliumEBPF.VerifierError{Cause: unix.EINVAL, Log: []string{"invalid func unknown#99"}}, want: false},
+		{name: "complexity limit", err: &CiliumEBPF.VerifierError{Cause: unix.E2BIG}, want: false},
+		{name: "no verifier error", err: unix.EINVAL, want: false},
+	} {
+		if got := verifierLogRetryMaskedError(testCase.err); got != testCase.want {
+			t.Errorf("%s: verifierLogRetryMaskedError = %v, want %v", testCase.name, got, testCase.want)
+		}
 	}
 }

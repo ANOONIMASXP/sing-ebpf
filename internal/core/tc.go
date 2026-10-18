@@ -267,7 +267,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	); err != nil {
 		return nil, err
 	}
-	_ = raiseMemlockLimit()
+	memlockErr := raiseMemlockLimit()
 	mapOverrides := map[string]mapSpecOverride{
 		"tc_control":             {name: "sb_tc_ctl", mapType: CiliumEBPF.Array, maxEntries: 1},
 		"tc_listener_sockets":    {name: "sb_tc_listen", mapType: CiliumEBPF.SockMap, maxEntries: 2},
@@ -311,7 +311,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		maps, loadedPrograms, err = loadTCResources(config, mapOverrides, true)
 	}
 	if err != nil {
-		return nil, err
+		return nil, explainBPFPermissionError(err, memlockErr)
 	}
 	controlValue := tcControl{
 		Flags:             tcFlags(config, policy),
@@ -687,7 +687,9 @@ func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.A
 // reused quickly, so an unconditional delete from a timeout callback could
 // remove a newer session's entry. A missing entry or a value mismatch is a
 // successful no-op; LRU eviction remains the fallback for entries which are
-// not observed by userspace during their lifetime.
+// not observed by userspace during their lifetime. The match ignores
+// LastSeenNS, which the programs refresh while the session is active; see
+// sameTCAssignment.
 func (b *TCBackend) RemoveAssignmentIfMatch(
 	protocol uint8,
 	source, destination netip.AddrPort,
@@ -710,7 +712,7 @@ func (b *TCBackend) RemoveAssignmentIfMatch(
 		}
 		return false, err
 	}
-	if current != expected {
+	if !sameTCAssignment(current, expected) {
 		return false, nil
 	}
 	if err = deleteMap(b.assignmentMapFD, unsafe.Pointer(&key)); err != nil {
@@ -720,6 +722,15 @@ func (b *TCBackend) RemoveAssignmentIfMatch(
 		return false, err
 	}
 	return true, nil
+}
+
+// sameTCAssignment reports whether two values are the same assignment. The
+// programs refresh LastSeenNS in place while the assignment is unchanged and
+// advance Generation whenever they rewrite it, so a session's value differs
+// from the current one in LastSeenNS alone until another session replaces it.
+func sameTCAssignment(left, right TCAssignment) bool {
+	left.LastSeenNS, right.LastSeenNS = 0, 0
+	return left == right
 }
 
 // SweepAssignments performs a bounded control-plane cleanup pass for TC

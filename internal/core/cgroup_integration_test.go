@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	CiliumEBPF "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/features"
 	"golang.org/x/sys/unix"
 )
 
@@ -70,6 +71,7 @@ func TestCgroupProgramMatrixIntegration(t *testing.T) {
 			}
 			if test.udp {
 				assertCgroupUDPMapHandoff(t, backend)
+				assertCgroupUDPReleaseObserverLoaded(t, backend)
 			}
 		})
 	}
@@ -353,6 +355,291 @@ func TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass(t *testing.T) {
 	assertUDPNotReceived(t, token)
 }
 
+// TestCgroupForceInterceptPrefixesIntegration requires every force-intercept
+// prefix of a family to override a pass default, while other destinations keep
+// it.
+func TestCgroupForceInterceptPrefixesIntegration(t *testing.T) {
+	requireEBPFIntegration(t, "test cgroup force-intercept prefixes")
+	cgroupRoot, err := DetectCgroup2Root()
+	if err != nil {
+		t.Skipf("cgroup v2 is unavailable: %v", err)
+	}
+	path, dedicated := createIntegrationCgroup(t, cgroupRoot, 102)
+	if !dedicated {
+		t.Skip("cannot create a dedicated cgroup")
+	}
+	policy, err := CompileActionPolicy(ActionPolicy{
+		Local: ActionScope{
+			Default: DecisionPass,
+			DestinationCIDR: []CIDRDecision{
+				{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept, EchoReply: true},
+				{Prefix: netip.MustParsePrefix("100.64.0.0/10"), Action: DecisionIntercept},
+			},
+		},
+		Shared: ActionScope{Default: DecisionIntercept},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfBypassMap, err := CiliumEBPF.NewMap(&CiliumEBPF.MapSpec{
+		Type:       CiliumEBPF.LRUHash,
+		KeySize:    8,
+		ValueSize:  4,
+		MaxEntries: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer selfBypassMap.Close()
+	backend, err := PrepareCgroup(CgroupConfig{
+		Path:          path,
+		EnableUDP:     true,
+		RedirectIPv4:  netip.MustParsePrefix("127.128.0.0/9"),
+		MapCapacity:   CgroupMapCapacity{TCPRedirect: 64, UDPRedirect: 64, UDPPeer: 64, UDPFlow: 64, SocketBypass: 8},
+		UDPTimeout:    time.Minute,
+		Policy:        policy,
+		SelfBypassMap: selfBypassMap,
+	})
+	if err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup eBPF is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	const listenerPort = 41020
+	if err = backend.LoadPrograms(listenerPort); err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup program loading is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err = backend.Attach(); err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup program attach is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	moveCurrentProcessToCgroup(t, path, cgroupRoot)
+
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: listenerPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	for _, testCase := range []struct {
+		destination string
+		intercepted bool
+	}{
+		{"198.18.0.7:9", true},
+		{"100.64.0.7:9", true},
+		{"203.0.113.7:9", false},
+	} {
+		t.Run(testCase.destination, func(t *testing.T) {
+			sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sender.Close()
+			// A passed datagram may have no route; only an intercepted one is
+			// redirected to the loopback listener.
+			_, _ = sender.WriteToUDPAddrPort([]byte(testCase.destination), netip.MustParseAddrPort(testCase.destination))
+			if testCase.intercepted {
+				assertUDPReceived(t, listener, testCase.destination)
+			} else {
+				assertUDPNotReceived(t, listener)
+			}
+		})
+	}
+}
+
+// TestCgroupUDPFlowCacheRevalidatesRedirect covers a cached proxy decision
+// whose redirect entry is gone, as after an LRU eviction, or now records
+// another flow, as when that flow claimed the freed token. The cache must not
+// send the datagram to a token userspace cannot map back to this destination.
+func TestCgroupUDPFlowCacheRevalidatesRedirect(t *testing.T) {
+	const listenerPort = 41010
+	backend := startCgroupUDPIntegrationBackend(t, 101, listenerPort)
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: listenerPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	cookie, err := udpSocketCookie(sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := netip.MustParseAddrPort("198.51.100.7:9")
+	flowKey := udpFlowKey{SocketCookie: cookie, Family: addressFamilyIPv4, Protocol: ProtocolUDP, Port: destination.Port()}
+	destination4 := destination.Addr().As4()
+	copy(flowKey.Addr[:4], destination4[:])
+	flows := backend.runtime.maps["cgroup_udp_flow"]
+	redirects := backend.runtime.maps["cgroup_udp_redirect"]
+
+	// send returns the token the flow cache holds after one datagram, and
+	// requires the redirect entry for it to record this socket's destination.
+	send := func(payload string) listenerLookupKey {
+		t.Helper()
+		if _, err := sender.WriteToUDPAddrPort([]byte(payload), destination); err != nil {
+			t.Fatal(err)
+		}
+		assertUDPReceived(t, listener, payload)
+		var flow udpFlowValue
+		if err := flows.Lookup(&flowKey, &flow); err != nil {
+			t.Fatalf("look up the UDP flow cache after %q: %v", payload, err)
+		}
+		if flow.Action != udpFlowActionProxy {
+			t.Fatalf("UDP flow action after %q = %d, want proxy", payload, flow.Action)
+		}
+		var original originalDestinationValue
+		if err := redirects.Lookup(&flow.Listener, &original); err != nil {
+			t.Fatalf("after %q the UDP flow cache names token %v without a redirect entry: %v",
+				payload, flow.Listener.TokenAddr[:4], err)
+		}
+		if original.SocketCookie != cookie || original.Port != destination.Port() ||
+			[4]byte(original.Addr[:4]) != destination4 {
+			t.Fatalf("after %q the UDP flow cache names a token recording %+v, want this socket's destination",
+				payload, original)
+		}
+		return flow.Listener
+	}
+
+	token := send("first")
+	if err = redirects.Delete(&token); err != nil {
+		t.Fatal(err)
+	}
+	token = send("after eviction")
+
+	claimed := originalDestinationValue{
+		Family:       addressFamilyIPv4,
+		Protocol:     ProtocolUDP,
+		Port:         53,
+		SocketCookie: cookie + 1,
+	}
+	copy(claimed.Addr[:4], netip.MustParseAddr("192.0.2.53").AsSlice())
+	if err = redirects.Update(&token, &claimed, CiliumEBPF.UpdateExist); err != nil {
+		t.Fatal(err)
+	}
+	if replacement := send("after reuse"); replacement == token {
+		t.Fatal("the UDP flow cache kept a token another flow claimed")
+	}
+	var current originalDestinationValue
+	if err = redirects.Lookup(&token, &current); err != nil || current != claimed {
+		t.Fatalf("the other flow's redirect entry = %+v, %v; want it left alone", current, err)
+	}
+}
+
+// TestCgroupUDPReleaseNotificationDropsCountOnlyLostEvents requires the drop
+// counter to mean what UDPReleaseNotificationDrops documents: an event the
+// full ring could not take. Unconnected sockets have no token to report.
+func TestCgroupUDPReleaseNotificationDropsCountOnlyLostEvents(t *testing.T) {
+	const listenerPort = 41011
+	backend := startCgroupUDPIntegrationBackend(t, 102, listenerPort)
+	if backend.UDPUserspaceCleanupMode() != cgroupUDPUserspaceCleanupRingBuffer {
+		t.Skip("socket-release notification is unavailable")
+	}
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: listenerPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	destination := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 8), Port: 9}
+
+	unconnected, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = unconnected.WriteToUDP([]byte("unconnected"), destination); err != nil {
+		t.Fatal(err)
+	}
+	assertUDPReceived(t, listener, "unconnected")
+	if err = unconnected.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	connected, err := net.DialUDP("udp4", nil, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie, err := udpSocketCookie(connected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = connected.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan UDPReleaseEvent, 1)
+	readErrors := make(chan error, 1)
+	go func() {
+		event, readErr := backend.ReadUDPRelease()
+		if readErr != nil {
+			readErrors <- readErr
+			return
+		}
+		events <- event
+	}()
+	select {
+	case event := <-events:
+		if event.SocketCookie != cookie {
+			t.Fatalf("UDP release event for socket %d, want the connected socket %d", event.SocketCookie, cookie)
+		}
+	case readErr := <-readErrors:
+		t.Fatal(readErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no UDP release event for the connected socket")
+	}
+	drops, err := backend.UDPReleaseNotificationDrops()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drops != 0 {
+		t.Fatalf("UDP release notification drops = %d with an empty ring, want 0", drops)
+	}
+}
+
+// startCgroupUDPIntegrationBackend attaches an IPv4 UDP backend that
+// intercepts every destination to a dedicated cgroup and moves this process
+// into it.
+func startCgroupUDPIntegrationBackend(t *testing.T, index int, listenerPort uint16) *CgroupBackend {
+	t.Helper()
+	requireEBPFIntegration(t, "attach cgroup UDP interception")
+	cgroupRoot, err := DetectCgroup2Root()
+	if err != nil {
+		t.Skipf("cgroup v2 is unavailable: %v", err)
+	}
+	path, dedicated := createIntegrationCgroup(t, cgroupRoot, index)
+	if !dedicated {
+		t.Skip("cannot create a dedicated cgroup")
+	}
+	backend, err := prepareCgroupIntegrationBackend(path, false, true, false)
+	if err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup eBPF is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	if err = backend.LoadPrograms(listenerPort); err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup program loading is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err = backend.Attach(); err != nil {
+		if cgroupIntegrationUnavailable(err) {
+			t.Skipf("cgroup program attach is unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	moveCurrentProcessToCgroup(t, path, cgroupRoot)
+	return backend
+}
+
 func moveCurrentProcessToCgroup(t *testing.T, path, root string) {
 	t.Helper()
 	pid := []byte(strconv.Itoa(os.Getpid()))
@@ -414,6 +701,20 @@ func createIntegrationCgroup(t *testing.T, root string, index int) (string, bool
 	}
 	t.Cleanup(func() { _ = os.Remove(path) })
 	return path, true
+}
+
+// assertCgroupUDPReleaseObserverLoaded catches a release-notification program
+// that the verifier rejects: the loader then falls back to deadline cleanup
+// without returning an error.
+func assertCgroupUDPReleaseObserverLoaded(t *testing.T, backend *CgroupBackend) {
+	t.Helper()
+	if !backend.runtime.socket_release_supported || features.HaveMapType(CiliumEBPF.RingBuf) != nil {
+		return
+	}
+	if mode := backend.UDPUserspaceCleanupMode(); mode != cgroupUDPUserspaceCleanupRingBuffer {
+		t.Fatalf("UDP userspace cleanup mode = %q, want %q: the socket-release notification program did not load",
+			mode, cgroupUDPUserspaceCleanupRingBuffer)
+	}
 }
 
 func prepareCgroupIntegrationBackend(path string, enableTCP, enableUDP, enableIPv6 bool) (*CgroupBackend, error) {

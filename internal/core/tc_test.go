@@ -47,6 +47,32 @@ func TestTCABI(t *testing.T) {
 	}
 }
 
+func TestSameTCAssignmentIgnoresOnlyActivity(t *testing.T) {
+	base := TCAssignment{
+		SocketCookie: 1, LastSeenNS: 10, InterfaceIndex: 2,
+		SourceMAC: MACAddress{1, 2, 3, 4, 5, 6}, Path: TCPathShared, SourceMACValid: 1, Generation: 3,
+	}
+	refreshed := base
+	refreshed.LastSeenNS = 20
+	if !sameTCAssignment(base, refreshed) {
+		t.Fatal("a refreshed activity timestamp made the assignment differ")
+	}
+	for name, change := range map[string]func(*TCAssignment){
+		"socket cookie":    func(value *TCAssignment) { value.SocketCookie++ },
+		"interface index":  func(value *TCAssignment) { value.InterfaceIndex++ },
+		"source MAC":       func(value *TCAssignment) { value.SourceMAC[5]++ },
+		"path":             func(value *TCAssignment) { value.Path = TCPathDelivery },
+		"source MAC valid": func(value *TCAssignment) { value.SourceMACValid = 0 },
+		"generation":       func(value *TCAssignment) { value.Generation++ },
+	} {
+		changed := base
+		change(&changed)
+		if sameTCAssignment(base, changed) {
+			t.Fatalf("assignments that differ in %s matched", name)
+		}
+	}
+}
+
 func TestTCIPv6PathFlags(t *testing.T) {
 	localFlags := tcFlags(TCConfig{EnableLocalIPv6: true}, CompiledPolicy{})
 	if localFlags&tcFlagLocalIPv6 == 0 || localFlags&tcFlagSharedIPv6 != 0 {

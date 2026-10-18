@@ -7,6 +7,15 @@ package core
 // The comments preserve the unabbreviated role shown by the shorter name in
 // diagnostics such as bpftool and sing-box's eBPF runtime status.
 const (
+	// Every interception backend program name starts with this prefix. Startup
+	// cleanup relies on it to recognize stale legacy attachments.
+	kernelProgramPrefixCgroup = "sb_ebpf_"
+	// Interception programs of older releases used this prefix. Startup
+	// cleanup still recognizes their stale legacy attachments.
+	kernelProgramPrefixLegacyCgroup = "sing_ebpf_"
+	// Every process tracker program name starts with this prefix.
+	kernelProgramPrefixProcessTracker = "sb_proc_"
+
 	// sb_ebpf_conn4: local cgroup IPv4 TCP/UDP connect redirection.
 	kernelProgramNameCgroupConnect4 = "sb_ebpf_conn4"
 	// sb_ebpf_udp4: local cgroup IPv4 UDP sendmsg redirection.

@@ -5,6 +5,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -326,10 +327,21 @@ func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded, listener
 	if _, err = io.ReadFull(tcpClient, buffer[:9]); err != nil || string(buffer[:9]) != "tcp reply" {
 		t.Fatalf("TCP reply %q: %v", buffer[:9], err)
 	}
+	// Only connection setup records a TCP assignment, so the established
+	// segments that follow its consumption must not recreate it.
+	if _, err = tcpClient.Write([]byte("tcp request")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = io.ReadFull(accepted, buffer[:11]); err != nil || string(buffer[:11]) != "tcp request" {
+		t.Fatalf("TCP request %q: %v", buffer[:11], err)
+	}
+	if assignment, err := backend.LookupAssignment(commonEBPF.ProtocolTCP, netip.MustParseAddrPort(accepted.RemoteAddr().String()), netip.MustParseAddrPort(endpoint), 0, false); !errors.Is(err, unix.ENOENT) {
+		t.Fatalf("established TCP segments recreated the consumed assignment: %+v err=%v", assignment, err)
+	}
 	if healthy, err := d.healthCheck(localInterface, sharedInterfaces, nil); err != nil || !healthy {
 		t.Fatalf("health=%v err=%v", healthy, err)
 	}
-	for _, fault := range []string{"mtu", "return_filter", "delivery_filter", "veth"} {
+	for _, fault := range []string{"mtu", "return_filter", "delivery_filter", "delivery_mac", "veth"} {
 		switch fault {
 		case "mtu":
 			err = netlink.LinkSetMTU(host, 1280)
@@ -337,6 +349,12 @@ func testTCIsolatedRoundTrip(t *testing.T, rawIP, shared, ipv6, seeded, listener
 			err = netlink.FilterDel(d.delivery.returnFilter)
 		case "delivery_filter":
 			err = n.with(func() error { return netlink.FilterDel(d.delivery.filter) })
+		case "delivery_mac":
+			// The backend must follow a changed private-end address, or every
+			// redirected frame is dropped as PACKET_OTHERHOST.
+			err = n.with(func() error {
+				return netlink.LinkSetHardwareAddr(d.delivery.delivery, net.HardwareAddr{0x02, 0x5b, 0x00, 0x00, 0x00, 0x01})
+			})
 		case "veth":
 			err = netlink.LinkDel(d.delivery.redirect)
 		}

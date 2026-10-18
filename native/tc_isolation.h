@@ -5,6 +5,8 @@
 // transport checksums remain untouched in both directions.
 #define SB_TC_DELIVERY_MAGIC 0x53425443U
 #define SB_TC_RETURN_ETHERNET 0x100U
+// Requests the assignment record; never part of the stored return owner.
+#define SB_TC_REDIRECT_RECORD 0x200U
 #define SB_TC_ACTIVITY_REFRESH_NS 1000000000ULL
 
 // Activity is an idle-cleanup hint, not packet accounting. Coalesce writes
@@ -52,8 +54,32 @@ INLINE bool same_return_owner(const struct sb_tc_return_value *left,
         source_mac_equal(left->destination_mac, right->destination_mac);
 }
 
+// Userspace takes a TCP connection's assignment once, when it accepts the
+// connection, and then removes it, so only setup packets need to record it.
+// Refreshing it from every later packet would cost an LRU lookup per packet
+// and recreate the consumed entry; the return route stays refreshed either way.
+INLINE __u32 assignment_record(const struct sb_tc_assign_key *flow, __u8 tcp_flag_byte) {
+    return flow->protocol != IPPROTO_TCP_VALUE || (tcp_flag_byte & TCP_FLAG_SYN) != 0U
+        ? SB_TC_REDIRECT_RECORD : 0U;
+}
+
+INLINE int deliver_isolated(struct __sk_buff *skb, const struct sb_tc_control *control, bool ethernet) {
+    if (ethernet) {
+        if (skb_store_bytes(skb, 0U, control->delivery_mac, 6U, 0U) != 0) return TC_ACT_SHOT;
+    } else {
+        struct ethernet_header header = {.protocol = skb->protocol};
+        __builtin_memcpy(header.destination, control->delivery_mac, 6U);
+        if (skb_change_head(skb, sizeof(header), 0U) != 0 ||
+            skb_store_bytes(skb, 0U, &header, sizeof(header), 0U) != 0) return TC_ACT_SHOT;
+    }
+    skb->cb[0] = SB_TC_DELIVERY_MAGIC;
+    return redirect((int)control->delivery_ifindex, 0U);
+}
+
 NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control *control,
     const struct sb_tc_assign_key *flow, __u64 cookie, __u32 flags) {
+    bool record = (flags & SB_TC_REDIRECT_RECORD) != 0U;
+    flags &= ~SB_TC_REDIRECT_RECORD;
     bool ethernet = (flags & SB_TC_RETURN_ETHERNET) != 0U;
     __u8 path = flags & 0xffU;
     __u64 now = ktime_get_ns();
@@ -87,6 +113,8 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
     }
     refresh_tc_activity(&existing->last_seen_ns, now);
 
+    if (!record) return deliver_isolated(skb, control, ethernet);
+
     struct sb_tc_assign_value *previous = map_lookup(&tc_assignment, flow);
     struct sb_tc_assign_value assignment = {
         .socket_cookie = cookie, .last_seen_ns = now, .ifindex = value.ifindex,
@@ -102,16 +130,7 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
         increment_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
         return TC_ACT_SHOT;
     }
-    if (ethernet) {
-        if (skb_store_bytes(skb, 0U, control->delivery_mac, 6U, 0U) != 0) return TC_ACT_SHOT;
-    } else {
-        struct ethernet_header header = {.protocol = skb->protocol};
-        __builtin_memcpy(header.destination, control->delivery_mac, 6U);
-        if (skb_change_head(skb, sizeof(header), 0U) != 0 ||
-            skb_store_bytes(skb, 0U, &header, sizeof(header), 0U) != 0) return TC_ACT_SHOT;
-    }
-    skb->cb[0] = SB_TC_DELIVERY_MAGIC;
-    return redirect((int)control->delivery_ifindex, 0U);
+    return deliver_isolated(skb, control, ethernet);
 }
 
 INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only) {
@@ -120,8 +139,8 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only) 
     skb->cb[0] = 0U;
     struct sb_tc_assign_key flow;
     __u8 mac[6];
-    if (!parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6 | SB_TC_FLAG_SHARED_IPV6,
-            true, &flow, mac, SB_TC_STAT_COUNT)) return TC_ACT_SHOT;
+    if (parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6 | SB_TC_FLAG_SHARED_IPV6,
+            true, false, &flow, mac, 0) != SB_TC_PARSE_FLOW) return TC_ACT_SHOT;
     struct bpf_sock *socket;
     if (!udp_only && flow.protocol == IPPROTO_TCP_VALUE) {
         socket = legacy ? lookup_tcp_socket_legacy(skb, control, &flow) : lookup_tcp_socket(skb, &flow);
@@ -174,9 +193,9 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
     __u32 offset;
     if (!parse_ethernet(data, end, &protocol, &offset, mac)) return TC_ACT_SHOT;
     if (protocol == ETH_P_IP_VALUE) {
-        if (!fill_ipv4_key(data, end, offset, control, &flow, SB_TC_STAT_COUNT, &fragment)) return TC_ACT_SHOT;
+        if (fill_ipv4_key(data, end, offset, control, &flow, &fragment, 0) != SB_TC_PARSE_FLOW) return TC_ACT_SHOT;
     } else if (protocol == ETH_P_IPV6_VALUE) {
-        if (!fill_ipv6_key(data, end, offset, control, &flow, SB_TC_STAT_COUNT, &fragment)) return TC_ACT_SHOT;
+        if (fill_ipv6_key(data, end, offset, control, &flow, &fragment, 0) != SB_TC_PARSE_FLOW) return TC_ACT_SHOT;
     } else {
         return TC_ACT_SHOT;
     }

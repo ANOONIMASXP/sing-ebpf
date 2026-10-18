@@ -3,6 +3,7 @@
 package core
 
 import (
+	"net/netip"
 	"sync"
 	"unsafe"
 
@@ -103,6 +104,7 @@ func PrepareICMPEchoReply(
 	sharedIPv6Enabled bool,
 	policy CompiledPolicy,
 ) (*ICMPEchoReplyBackend, error) {
+	policy = policy.echoReplyPolicy()
 	if len(policy.localForce.ipv4)+len(policy.localForce.ipv6)+len(policy.sharedForce.ipv4)+len(policy.sharedForce.ipv6) == 0 {
 		return nil, E.New("ICMP echo reply requires a configured force-intercept prefix")
 	}
@@ -257,4 +259,27 @@ func (b *ICMPEchoReplyBackend) Close() error {
 	}
 	b.closed = true
 	return closeObjectResources(b.runtime.programs, b.runtime.maps)
+}
+
+// echoReplyPolicy returns the destination sets the responder answers, in the
+// force-intercept fields it loads: per scope and address family, the
+// intercept prefixes selected by CIDRDecision.EchoReply, or every intercept
+// prefix of that family when none is selected.
+func (p CompiledPolicy) echoReplyPolicy() CompiledPolicy {
+	answered := func(force, echoReply []netip.Prefix) []netip.Prefix {
+		if len(echoReply) > 0 {
+			return echoReply
+		}
+		return force
+	}
+	return CompiledPolicy{
+		localForce: dualStackCIDRPrefixes{
+			ipv4: answered(p.localForce.ipv4, p.localEchoReply.ipv4),
+			ipv6: answered(p.localForce.ipv6, p.localEchoReply.ipv6),
+		},
+		sharedForce: dualStackCIDRPrefixes{
+			ipv4: answered(p.sharedForce.ipv4, p.sharedEchoReply.ipv4),
+			ipv6: answered(p.sharedForce.ipv6, p.sharedEchoReply.ipv6),
+		},
+	}
 }

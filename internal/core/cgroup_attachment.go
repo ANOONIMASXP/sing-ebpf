@@ -3,10 +3,15 @@
 package core
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -36,16 +41,54 @@ func cgroupProgramLinkCloseComplete(programLink cgroupProgramLink, closeErr erro
 	return !retryable || retryableLink.IsClosed()
 }
 
+// attachRawLink is replaced in tests to exercise the legacy fallbacks without
+// a kernel that rejects BPF_LINK_CREATE.
+var attachRawLink = link.AttachRawLink
+
+// cgroupAttachPolicy selects whether a legacy cgroup attachment may end in
+// the kernel's single-program mode.
+type cgroupAttachPolicy uint8
+
+const (
+	// cgroupAttachAllowExclusive permits the unflagged legacy fallback on an
+	// empty hook when the kernel rejects multi-program attachment. Use it only
+	// for a component that owns its cgroup or has no other fallback.
+	cgroupAttachAllowExclusive cgroupAttachPolicy = iota
+	// cgroupAttachMultiOnly never leaves the hook in single-program mode. A
+	// single-program hook makes the kernel reject every later multi-program
+	// attachment, including BPF_LINK_CREATE, so an optional component that
+	// shares a cgroup with the interception backend must not create one.
+	cgroupAttachMultiOnly
+)
+
 // attachCgroupProgram prefers BPF_LINK_CREATE, whose cgroup implementation is
 // inherently multi-program, then falls back to legacy BPF_PROG_ATTACH. The
 // legacy path tries BPF_F_ALLOW_MULTI first and retries without flags only when
-// the kernel rejects multi attachment with a compatibility error.
+// the kernel rejects multi attachment with a compatibility error and the hook
+// is empty.
 func attachCgroupProgram(path string, program *CiliumEBPF.Program, attachType CiliumEBPF.AttachType) (cgroupProgramLink, error) {
+	return attachCgroupProgramWithPolicy(path, program, attachType, cgroupAttachAllowExclusive)
+}
+
+// attachCgroupProgramShared attaches an optional program to a cgroup that may
+// also carry the interception backend. It uses only multi-program operations,
+// so a kernel that rejects them makes the optional feature unavailable instead
+// of locking the required backend out of the same hook.
+func attachCgroupProgramShared(path string, program *CiliumEBPF.Program, attachType CiliumEBPF.AttachType) (cgroupProgramLink, error) {
+	return attachCgroupProgramWithPolicy(path, program, attachType, cgroupAttachMultiOnly)
+}
+
+func attachCgroupProgramWithPolicy(
+	path string,
+	program *CiliumEBPF.Program,
+	attachType CiliumEBPF.AttachType,
+	policy cgroupAttachPolicy,
+) (cgroupProgramLink, error) {
 	cgroupFile, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	programLink, linkErr := link.AttachRawLink(link.RawLinkOptions{
+	programLink, linkErr := attachRawLink(link.RawLinkOptions{
 		Target:  int(cgroupFile.Fd()),
 		Program: program,
 		Attach:  attachType,
@@ -58,7 +101,12 @@ func attachCgroupProgram(path string, program *CiliumEBPF.Program, attachType Ci
 		_ = cgroupFile.Close()
 		return nil, linkErr
 	}
-	if err = attachProgramRaw(int(cgroupFile.Fd()), program, attachType); err != nil {
+	if policy == cgroupAttachMultiOnly {
+		err = attachProgramRawMultiOnly(int(cgroupFile.Fd()), program, attachType)
+	} else {
+		err = attachProgramRaw(int(cgroupFile.Fd()), program, attachType)
+	}
+	if err != nil {
 		_ = cgroupFile.Close()
 		return nil, E.Errors(linkErr, err)
 	}
@@ -99,114 +147,188 @@ func (l *legacyCgroupProgramLink) IsClosed() bool {
 	return l == nil || l.cgroupFile == nil
 }
 
-// lockCgroupFile takes the exclusive lock that marks this cgroup as managed
-// here.
+// cgroupSharedLockTimeout bounds the wait for another backend's exclusive
+// startup reclaim to finish.
+var cgroupSharedLockTimeout = 2 * time.Second
+
+// lockCgroupFile marks the cgroup as managed by an interception backend and
+// reports whether this backend is the only one alive on it.
 //
-// A lock that is already held is still reported as EBUSY, so callers matching
+// Every backend of this build keeps a shared lock on the cgroup directory for
+// its lifetime, so several backends can run on one cgroup. Builds without
+// multi-instance support keep an exclusive lock instead, which keeps them and
+// this build off the same cgroup. A backend starts by taking the lock
+// exclusively: getting it proves that no other backend is alive on the cgroup,
+// so every interception program found there is stale and may be reclaimed.
+// shareCgroupLock then downgrades it before anything is attached.
+//
+// A lock that stays held exclusively is reported as EBUSY, so callers matching
 // on it keep working, but it is described for what is known rather than what is
-// likely. The holder may be another running instance, and it may equally be a
-// handle this process itself has not let go of, because a close that could not
-// detach every program keeps the cgroup open. Naming only the first would send
-// the reader looking for a second process that need not exist.
-func lockCgroupFile(cgroupFile *os.File) error {
+// likely: the holder may be a running instance of such a build or a handle one
+// kept after a close that did not finish.
+func lockCgroupFile(cgroupFile *os.File) (bool, error) {
 	err := unix.Flock(int(cgroupFile.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	if err == nil {
-		return nil
+		return true, nil
 	}
-	if errors.Is(err, unix.EWOULDBLOCK) {
-		return E.Cause(unix.EBUSY,
-			"the exclusive lock on this cgroup is already held, "+
-				"either by another active instance or by an earlier close that did not finish: ",
-			"lock cgroup")
+	if !errors.Is(err, unix.EWOULDBLOCK) {
+		return false, eBPFOperationError("lock cgroup", err)
 	}
-	return eBPFOperationError("lock cgroup", err)
+	return false, shareCgroupLock(cgroupFile)
 }
 
-func detachOwnedCgroupPrograms(cgroupFD int) error {
+// shareCgroupLock takes or downgrades to the shared lock. An exclusive holder of
+// this build only keeps it while it reclaims stale programs.
+func shareCgroupLock(cgroupFile *os.File) error {
+	deadline := time.Now().Add(cgroupSharedLockTimeout)
+	for {
+		err := unix.Flock(int(cgroupFile.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) {
+			return eBPFOperationError("lock cgroup", err)
+		}
+		if !time.Now().Before(deadline) {
+			return E.Cause(unix.EBUSY,
+				"the exclusive lock on this cgroup is already held, "+
+					"either by an active instance of a sing-ebpf build without multi-instance support "+
+					"or by an earlier close of one that did not finish: ",
+				"lock cgroup")
+		}
+		time.Sleep(instanceMutexRetry)
+	}
+}
+
+// acquireCgroupSlot takes one of the cgroup's instance slots. The slot keys
+// the kernel names of this backend's programs, which is what lets a backend
+// that shares the cgroup with others reclaim the stale programs of its own
+// slot and only those. Slot names live in the caller's network namespace, as
+// do the redirect routes a backend depends on, so backends sharing a cgroup are
+// expected to share one.
+func acquireCgroupSlot(cgroupFile *os.File) (*InstanceSlot, error) {
+	var status unix.Stat_t
+	if err := unix.Fstat(int(cgroupFile.Fd()), &status); err != nil {
+		return nil, eBPFOperationError("inspect cgroup", err)
+	}
+	base := "@sing-ebpf-cgroup-" + strconv.FormatUint(uint64(status.Dev), 16) + "-" + strconv.FormatUint(status.Ino, 16)
+	slot, err := AcquireInstanceSlot(func(slot int) string { return InstanceSlotName(base, slot) })
+	if errors.Is(err, ErrInstanceSlotsExhausted) {
+		return nil, E.New("cgroup is already managed by ", MaxInstanceSlots, " sing-ebpf interception backends")
+	}
+	if err != nil {
+		return nil, E.Cause(err, "lock cgroup slot")
+	}
+	return slot, nil
+}
+
+// Reclaim scopes for detachOwnedCgroupPrograms besides a slot number.
+const (
+	// cgroupReclaimAllSlots reclaims every interception program: no other
+	// backend is alive on the cgroup.
+	cgroupReclaimAllSlots = -1
+	// cgroupReclaimNoSlot reclaims no interception program: a backend in
+	// another network namespace may hold the same slot number.
+	cgroupReclaimNoSlot = -2
+)
+
+// procLocksPath is a variable so tests can supply a listing.
+var procLocksPath = "/proc/locks"
+
+// cgroupSharedAcrossNetworkNamespaces reports whether a process in another
+// network namespace holds a lock on the cgroup. Slot names are abstract socket
+// names, which that namespace does not see, so a backend there may hold the
+// same slot number as this one and reclaiming "this slot's" programs could
+// detach its live ones. A listing that cannot be read reports false: the
+// namespaces are then assumed to be shared, as backends are expected to be.
+func cgroupSharedAcrossNetworkNamespaces(cgroupFile *os.File) bool {
+	var status unix.Stat_t
+	if err := unix.Fstat(int(cgroupFile.Fd()), &status); err != nil {
+		return false
+	}
+	own, err := os.Readlink("/proc/thread-self/ns/net")
+	if err != nil {
+		if own, err = os.Readlink("/proc/self/ns/net"); err != nil {
+			return false
+		}
+	}
+	locks, err := os.Open(procLocksPath)
+	if err != nil {
+		return false
+	}
+	defer locks.Close()
+	file := fmt.Sprintf("%02x:%02x:%d", unix.Major(uint64(status.Dev)), unix.Minor(uint64(status.Dev)), status.Ino)
+	return foreignNetworkNamespaceLockHolder(locks, file, os.Getpid(), own, func(pid int) (string, error) {
+		return os.Readlink("/proc/" + strconv.Itoa(pid) + "/ns/net")
+	})
+}
+
+// foreignNetworkNamespaceLockHolder scans a /proc/locks listing for a flock
+// on file held by a process whose network namespace differs from own. A
+// holder whose namespace cannot be read counts as foreign unless it has
+// exited.
+func foreignNetworkNamespaceLockHolder(
+	locks io.Reader,
+	file string,
+	ownPID int,
+	own string,
+	networkNamespace func(pid int) (string, error),
+) bool {
+	scanner := bufio.NewScanner(locks)
+	for scanner.Scan() {
+		// "1: FLOCK  ADVISORY  READ 1234 00:1d:5678 0 EOF", with "->" after
+		// the number for a waiter.
+		fields := strings.Fields(scanner.Text())
+		index := slices.Index(fields, "FLOCK")
+		if index < 0 || len(fields) < index+5 || fields[index+4] != file {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[index+3])
+		if err != nil || pid <= 0 || pid == ownPID {
+			continue
+		}
+		namespace, err := networkNamespace(pid)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || namespace != own {
+			return true
+		}
+	}
+	return false
+}
+
+// cgroupKernelProgramName is the kernel name of an interception program in a
+// cgroup slot. Slot 0 keeps the names of single-instance builds, so the stale
+// programs such a build leaves behind are slot 0's.
+func cgroupKernelProgramName(base string, slot int) string {
+	if slot == 0 {
+		return base
+	}
+	return base + "_" + strconv.FormatUint(uint64(slot), 16)
+}
+
+// cgroupProgramSlot returns the slot an interception program name belongs to,
+// or -1 for any other name. The sing_ebpf_ programs of older releases come
+// from single-instance builds, whose leftovers are slot 0's.
+func cgroupProgramSlot(name string) int {
+	if strings.HasPrefix(name, kernelProgramPrefixLegacyCgroup) {
+		return 0
+	}
 	for _, definition := range cgroupProgramDefinitions {
-		if _, err := detachOwnedCgroupProgramsForAttach(cgroupFD, definition.attachType); err != nil {
-			if definition.attachType == CiliumEBPF.AttachCgroupInetSockRelease && socketReleaseUnavailable(err) {
-				continue
-			}
-			return err
+		if name == definition.kernelProgramName {
+			return 0
+		}
+		suffix, found := strings.CutPrefix(name, definition.kernelProgramName+"_")
+		if !found || len(suffix) != 1 {
+			continue
+		}
+		slot, err := strconv.ParseUint(suffix, 16, 8)
+		if err == nil && slot > 0 && slot < MaxInstanceSlots {
+			return int(slot)
 		}
 	}
-	return nil
-}
-
-// detachOwnedCgroupProgramsForAttach removes only programs that belong to a
-// sing-ebpf generation. Older releases used the sing_ebpf_ prefix, while the
-// current diagnostic names use sb_ebpf_. Never detach an unknown owner: the
-// caller may be sharing the host cgroup with netd or another eBPF service.
-func detachOwnedCgroupProgramsForAttach(cgroupFD int, attachType CiliumEBPF.AttachType) (bool, error) {
-	first, err := queryCgroupProgramIDs(cgroupFD, attachType)
-	if err != nil {
-		return false, err
-	}
-	second, err := queryCgroupProgramIDs(cgroupFD, attachType)
-	if err != nil {
-		return false, err
-	}
-	if !sameProgramIDs(first, second) {
-		return false, unix.ESTALE
-	}
-	var detached bool
-	for _, programID := range first {
-		name, nameErr := programNameByID(programID)
-		if nameErr != nil {
-			return detached, nameErr
-		}
-		if ownedCgroupProgramName(name) {
-			program, openErr := newProgramFromID(programID)
-			if openErr != nil {
-				return detached, openErr
-			}
-			// A stale program that is the hook's only program may have taken the
-			// hook over from Android netd and never given it back. Put a netd
-			// placeholder back instead of emptying the hook; the interception
-			// backend takes it over again when it attaches and restores it on
-			// detach.
-			if len(first) == 1 {
-				restored, restoreErr := restoreNetdOwnerForStaleProgram(cgroupFD, attachType)
-				if restoreErr != nil {
-					_ = program.Close()
-					return detached, restoreErr
-				}
-				if restored {
-					detached = true
-					if closeErr := program.Close(); closeErr != nil {
-						return detached, closeErr
-					}
-					continue
-				}
-			}
-			if detachErr := rawDetachProgram(cgroupFD, program, attachType); detachErr != nil {
-				_ = program.Close()
-				return detached, detachErr
-			}
-			detached = true
-			if closeErr := program.Close(); closeErr != nil {
-				return detached, closeErr
-			}
-		}
-	}
-	return detached, nil
-}
-
-func ownedCgroupProgramName(name string) bool {
-	return strings.HasPrefix(name, "sb_ebpf_") || strings.HasPrefix(name, "sing_ebpf_")
-}
-
-func queryCgroupProgramIDs(cgroupFD int, attachType CiliumEBPF.AttachType) ([]CiliumEBPF.ProgramID, error) {
-	result, err := queryCgroupPrograms(link.QueryOptions{Target: cgroupFD, Attach: attachType})
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]CiliumEBPF.ProgramID, len(result.Programs))
-	for index := range result.Programs {
-		ids[index] = result.Programs[index].ID
-	}
-	return ids, nil
+	return -1
 }
 
 // cgroupProgQueryAttr is the BPF_PROG_QUERY member of union bpf_attr, through
@@ -246,37 +368,122 @@ var queryCgroupHookFlags = func(cgroupFD int, attachType CiliumEBPF.AttachType) 
 	return attr.attachFlags, nil
 }
 
-var newProgramFromID = CiliumEBPF.NewProgramFromID
-
-var programNameByID = func(programID CiliumEBPF.ProgramID) (string, error) {
-	program, err := newProgramFromID(programID)
-	if err != nil {
-		return "", err
+// reclaimableCgroupProgram decides which programs found on the interception
+// cgroup at startup are stale sing-ebpf state that may be detached.
+//
+// slot is cgroupReclaimAllSlots when the backend holds the cgroup lock
+// exclusively: no other interception backend is alive, so every interception
+// program is stale. Otherwise other backends share the cgroup and only the
+// programs named for the backend's own slot are stale, since the slot is held,
+// and cgroupReclaimNoSlot reclaims none of them. Programs attached through a
+// BPF link disappear with their owner and are never found stale; a legacy
+// detach does not reach them either.
+//
+// A process tracker program is reclaimed only when it is the single program of
+// a hook that is not in multi-program mode. The tracker attaches with
+// multi-program operations only, and BPF links are always multi-program, so
+// such an attachment can only come from an unflagged legacy BPF_PROG_ATTACH
+// made by an earlier sing-ebpf build. That attachment belongs to the cgroup,
+// survives its process, and makes the kernel reject every multi-program
+// attachment on the hook. A tracker attached by a live process in multi mode,
+// including one this process started before the backend, is left alone.
+func reclaimableCgroupProgram(name string, slot int, hookFlags uint32, programCount int) bool {
+	if ownedCgroupProgramName(name) {
+		return slot == cgroupReclaimAllSlots || slot >= 0 && cgroupProgramSlot(name) == slot
 	}
-	info, infoErr := program.Info()
-	closeErr := program.Close()
-	if infoErr != nil {
-		return "", infoErr
-	}
-	if closeErr != nil {
-		return "", closeErr
-	}
-	return info.Name, nil
+	return strings.HasPrefix(name, kernelProgramPrefixProcessTracker) &&
+		hookFlags&unix.BPF_F_ALLOW_MULTI == 0 && programCount == 1
 }
 
-func cgroupProgramOwnerNames(result *link.QueryResult) ([]string, error) {
-	owners := make([]string, 0, len(result.Programs))
-	for _, attached := range result.Programs {
-		name, err := programNameByID(attached.ID)
+// detachOwnedCgroupPrograms reclaims the stale programs reclaimableCgroupProgram
+// selects for slot.
+func detachOwnedCgroupPrograms(cgroupFD int, slot int) error {
+	for _, definition := range cgroupProgramDefinitions {
+		first, err := queryCgroupProgramIDs(cgroupFD, definition.attachType)
 		if err != nil {
-			return nil, err
+			if definition.attachType == CiliumEBPF.AttachCgroupInetSockRelease && socketReleaseUnavailable(err) {
+				continue
+			}
+			return err
 		}
-		if name == "" {
-			name = fmt.Sprintf("program-%d", attached.ID)
+		if len(first) == 0 {
+			continue
 		}
-		owners = append(owners, name)
+		// Unknown flags are treated as multi-program mode so that only
+		// interception backend programs are reclaimed.
+		hookFlags := uint32(unix.BPF_F_ALLOW_MULTI)
+		if flags, flagsErr := queryCgroupHookFlags(cgroupFD, definition.attachType); flagsErr == nil {
+			hookFlags = flags
+		}
+		second, err := queryCgroupProgramIDs(cgroupFD, definition.attachType)
+		if err != nil {
+			return err
+		}
+		if !sameProgramIDs(first, second) {
+			return unix.ESTALE
+		}
+		for _, programID := range first {
+			program, openErr := CiliumEBPF.NewProgramFromID(programID)
+			if openErr != nil {
+				return openErr
+			}
+			info, infoErr := program.Info()
+			if infoErr != nil {
+				_ = program.Close()
+				return infoErr
+			}
+			if reclaimableCgroupProgram(info.Name, slot, hookFlags, len(first)) {
+				// A stale program that is the sole single-program owner took the
+				// hook over from Android netd and never gave it back. Put a netd
+				// placeholder back instead of emptying the hook; the ordinary
+				// attach then takes the hook over again and restores it on
+				// detach.
+				if hookFlags&unix.BPF_F_ALLOW_MULTI == 0 && len(first) == 1 {
+					restored, restoreErr := restoreNetdOwnerForStaleProgram(cgroupFD, definition.attachType, hookFlags)
+					if restoreErr != nil {
+						_ = program.Close()
+						return restoreErr
+					}
+					if restored {
+						if closeErr := program.Close(); closeErr != nil {
+							return closeErr
+						}
+						continue
+					}
+				}
+				// ENOENT: the program is attached through a link, so its owner is
+				// alive and only it can detach the program.
+				if detachErr := rawDetachProgram(cgroupFD, program, definition.attachType); detachErr != nil &&
+					!errors.Is(detachErr, unix.ENOENT) {
+					_ = program.Close()
+					return detachErr
+				}
+			}
+			if closeErr := program.Close(); closeErr != nil {
+				return closeErr
+			}
+		}
 	}
-	return owners, nil
+	return nil
+}
+
+// ownedCgroupProgramName reports whether name is an interception program of
+// any sing-ebpf generation. Older releases used the sing_ebpf_ prefix, the
+// current names use sb_ebpf_. Unknown owners, such as netd's, never match.
+func ownedCgroupProgramName(name string) bool {
+	return strings.HasPrefix(name, kernelProgramPrefixCgroup) || strings.HasPrefix(name, kernelProgramPrefixLegacyCgroup)
+}
+
+func queryCgroupProgramIDs(cgroupFD int, attachType CiliumEBPF.AttachType) ([]CiliumEBPF.ProgramID, error) {
+	result, err := queryCgroupPrograms(link.QueryOptions{Target: cgroupFD, Attach: attachType})
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]CiliumEBPF.ProgramID, len(result.Programs))
+	for index := range result.Programs {
+		ids[index] = result.Programs[index].ID
+	}
+	return ids, nil
 }
 
 func (b *CgroupBackend) Attach() error {
@@ -303,7 +510,7 @@ func (b *CgroupBackend) Attach() error {
 		if program == nil {
 			continue
 		}
-		programLink, err := link.AttachRawLink(link.RawLinkOptions{
+		programLink, err := attachRawLink(link.RawLinkOptions{
 			Target:  cgroupFD,
 			Program: program,
 			Attach:  cgroupProgramDefinitions[slot].attachType,

@@ -52,8 +52,6 @@ INLINE int rewrite_ipv4(
 	int checksum_disabled = protocol == IPPROTO_UDP_VALUE
 		? ipv4_udp_checksum_disabled(skb, checksum_offset) : 0;
 	if (checksum_disabled < 0) { record_rewrite_failure(); return TC_ACT_SHOT; }
-	__s64 address_diff = csum_diff(&old_address, 4U, &new_address, 4U, 0U);
-	if (address_diff < 0) { record_rewrite_failure(); return TC_ACT_SHOT; }
 	if (l3_csum_replace(
 			skb,
             l3_offset + __builtin_offsetof(struct ipv4_header, checksum),
@@ -63,8 +61,10 @@ INLINE int rewrite_ipv4(
 		record_rewrite_failure();
 		return TC_ACT_SHOT;
 	}
+	// A 4-byte pseudo-header replacement folds the address change directly;
+	// unlike IPv6 it needs no separate csum_diff call.
 	if ((!checksum_disabled &&
-		(l4_csum_replace(skb, checksum_offset, 0U, (__u64)address_diff, pseudo_header_checksum_flags(protocol, 0U)) != 0 ||
+		(l4_csum_replace(skb, checksum_offset, old_address, new_address, pseudo_header_checksum_flags(protocol, 4U)) != 0 ||
 		 l4_csum_replace(skb, checksum_offset, old_port, new_port, checksum_flags(protocol, 2U)) != 0)) ||
         skb_store_bytes(skb, address_offset, &new_address, sizeof(new_address), 0U) != 0 ||
         skb_store_bytes(skb, port_offset, &new_port, sizeof(new_port), 0U) != 0) {
@@ -98,9 +98,15 @@ INLINE int rewrite_ipv6(
         ? __builtin_offsetof(struct ipv6_header, source)
         : __builtin_offsetof(struct ipv6_header, destination));
     __u32 port_offset = l4_offset + (source ? 0U : 2U);
+    // On a CHECKSUM_COMPLETE skb a pseudo-header l4_csum_replace also takes
+    // the address diff out of skb->csum, as if an IPv4 header checksum had
+    // absorbed the address change. IPv6 has none, so the stored address must
+    // put the diff back, or the stack reports "hw csum failure" and verifies
+    // every rewritten packet in software. BPF_F_IPV6 says the same thing but
+    // only exists since Linux 6.16; the recompute flag only touches COMPLETE.
 	if (l4_csum_replace(skb, checksum_offset, 0U, (__u64)address_diff, pseudo_header_checksum_flags(protocol, 0U)) != 0 ||
         l4_csum_replace(skb, checksum_offset, old_port, new_port, checksum_flags(protocol, 2U)) != 0 ||
-        skb_store_bytes(skb, address_offset, new_address, 16U, 0U) != 0 ||
+        skb_store_bytes(skb, address_offset, new_address, 16U, BPF_F_RECOMPUTE_CSUM) != 0 ||
         skb_store_bytes(skb, port_offset, &new_port, sizeof(new_port), 0U) != 0) {
         record_rewrite_failure();
         return TC_ACT_SHOT;
@@ -109,7 +115,7 @@ INLINE int rewrite_ipv6(
 }
 
 INLINE bool ipv4_token_address(__be32 address, const struct sb_shared_control *control) {
-    __u32 host = swap32(address);
+    __u32 host = network_order32(address);
     __u32 prefix = ((__u32)control->token_ipv4_prefix[0] << 24U) |
         ((__u32)control->token_ipv4_prefix[1] << 16U) |
         ((__u32)control->token_ipv4_prefix[2] << 8U) |
@@ -119,8 +125,14 @@ INLINE bool ipv4_token_address(__be32 address, const struct sb_shared_control *c
     return (host & mask) == (prefix & mask);
 }
 
+// Tokens fill the host half of a /64 prefix. Both the IPv6 header address and
+// the control prefix are 4-byte aligned, so the prefix compares as two words.
 INLINE bool ipv6_token_address(const __u8 address[16], const struct sb_shared_control *control) {
-    return equal_address(address, control->token_ipv6_prefix, 8U);
+    __u32 candidate[2];
+    __u32 prefix[2];
+    __builtin_memcpy(candidate, SB_ALIGNED4(address), sizeof(candidate));
+    __builtin_memcpy(prefix, SB_ALIGNED4(control->token_ipv6_prefix), sizeof(prefix));
+    return candidate[0] == prefix[0] && candidate[1] == prefix[1];
 }
 
 #endif

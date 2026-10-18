@@ -152,8 +152,10 @@ the map can itself fault affected kernels, so the safety deny-list and positive
 BTF evidence are kept separate from ordinary capability selection.
 
 Current important fallbacks include TCX → owned `clsact`, SOCKMAP-capable TCP →
-legacy TCP lookup, cgroup socket-release notification → bounded LRU cleanup,
-socket-release probe permission denial → the same bounded LRU cleanup,
+legacy TCP lookup, a listener the SOCKMAP rejects (an MPTCP listener, the Go
+default since Go 1.24) → direct listener lookup selected at registration,
+cgroup socket-release notification → bounded LRU cleanup,
+socket-release probe permission denial → the same bounded LRU cleanup, and
 cgroup multi-program → compatible legacy exclusive attachment, and a root hook
 held by the Android 15+ netd pass-through placeholder → unflagged replacement
 of that placeholder, restored on detach. Do not turn an optional fallback
@@ -165,17 +167,27 @@ time-source modes.
 The socket-release capability probe is deliberately multi-only: it must never
 fall back to an unflagged attach that could replace an existing cgroup owner.
 The ordinary cgroup hook attach may still use the legacy-exclusive fallback
-after querying for an existing owner. The only existing owner the interception
-backend replaces is a pass-through recognized in `cgroup_netd.go`: the lone
-owner of a hook in single-program or override mode whose translated
-instructions reduce to `r0 = 1; exit`. Names, BTF and pins vary across netd
-builds and are consulted only when the kernel withholds the instructions. The
-replacement and the restore use the hook's own flags, so the hook never leaves
-the mode netd's restart path requires, and the displaced program is kept open
-and put back by the same code that detaches ours. Optional components that
-attach through `attachCgroupProgram` never replace an owner. Stale-program
-reclaim on a netd device swaps in netd's pin or an `sb_hook_allow`
-pass-through rather than emptying the hook.
+after querying for an existing owner, but only for the interception backend
+(which has no other fallback) and the self-bypass hooks in an exclusive process
+cgroup. The only existing owner it replaces, and only for the interception
+backend, is a pass-through recognized in `cgroup_netd.go`: the lone owner of a
+hook in single-program or override mode whose translated instructions reduce to
+`r0 = 1; exit`. Names, BTF and pins vary across netd builds and are consulted
+only when the kernel withholds the instructions. The replacement and the
+restore use the hook's own flags, so the hook never leaves the mode netd's
+restart path requires. The displaced program is kept open and put back by the
+same code that detaches ours. Optional components, the self-bypass hooks
+included, never replace an owner. Startup reclaim
+of a stale takeover on a netd device swaps in netd's pin or an `sb_hook_allow`
+pass-through rather than emptying the hook. Optional components that share a cgroup with the interception backend,
+such as the process tracker on the cgroup v2 root, use
+`attachCgroupProgramShared`: a single-program hook would make the kernel reject
+the backend's own multi-program or link attachment on that hook. Startup
+reclaim may detach the `sb_ebpf_*` programs of the backend's own cgroup slot, or
+of every slot while it holds the cgroup lock exclusively, and `sb_proc_*`
+programs only when one is the sole program of a hook not in multi-program mode;
+keep the program name prefixes in `program_name.go` and the slot suffixes of
+`cgroupKernelProgramName` in sync with that rule.
 
 On kernels without `BPF_MAP_LOOKUP_AND_DELETE_ELEM`, userspace must not emulate
 atomic consume with separate lookup and delete syscalls. It retains the bounded
@@ -206,6 +218,20 @@ Every resource must have one owner and appear in reverse-order cleanup. Verify:
 - workers are cancellable and joined; timers do not create idle wakeups without
   a concrete unobservable state to check; and
 - callbacks are never invoked while holding a lock they can re-enter.
+
+Several runtimes may share an interface, a cgroup and a network namespace (see
+the multi-instance section of [ARCHITECTURE.md](ARCHITECTURE.md)). For any new
+kernel state that another instance could also create, verify:
+
+- its name, handle or identifier is derived from a held instance slot, never a
+  fixed constant shared by every instance;
+- startup reclaims stale state only under the slot whose names it carries, and
+  a reclaim must not depend on a numeric handle alone;
+- a setting several runtimes depend on is restored by the last lease holder,
+  not by the runtime that happened to change it;
+- a read-then-claim sequence over shared state holds an instance mutex; and
+- programs keep passing unselected traffic (`TC_ACT_UNSPEC`, `TCX_NEXT`, or
+  `1` from a cgroup hook) so later instances on the same hook still see it.
 
 Shared runtime notifications are delivered after releasing the runtime lock.
 `PrepareBackend` is different: it is a synchronous factory inside the
@@ -271,7 +297,9 @@ sudo env \
 
 Set `SING_EBPF_REQUIRE_TCX=1` only on a host where TCX is expected and should be
 a hard requirement. The normal integration suite must also exercise `clsact`
-fallback instead of treating TCX as universally available.
+fallback instead of treating TCX as universally available. TCX serves every TC
+priority, so a test that needs the clsact path calls `forceTCClsact(t)` rather
+than choosing a non-default priority.
 
 The privileged matrix should cover all affected combinations:
 
@@ -280,6 +308,8 @@ The privileged matrix should cover all affected combinations:
 - Ethernet and supported raw-IP framing where applicable;
 - object-load and attach fallback selection;
 - interface absence, recreation, role change, and ifindex reuse;
+- several runtimes or backends on one interface, cgroup or namespace,
+  including priority order, stale-slot reclaim and shared-setting restore;
 - route/rule collision, partial startup, detach failure, and cleanup retry;
 - fragmented packet pass behavior and pass/failure counters;
 - UDP flow creation, reply restoration, timeout, release, queue pressure, and
@@ -302,7 +332,20 @@ alone is not an attachment or traffic test.
 ## Debugging evidence
 
 For verifier failures, retain the complete verifier log and identify the exact
-object/program variant. For runtime failures, collect:
+object/program variant. Before Linux 5.2 the verifier rejects a log buffer over
+16 MiB with EINVAL and an empty log, so cilium/ebpf's growing log retry can
+hide the real error, typically E2BIG from the 131072-instruction complexity
+limit; the loader then repeats the load without a log to report it. Changes to
+the shared packet-rewrite ingress program should be loaded on a 4.19 kernel,
+which has the least verifier headroom. `TestSelectedObjectLoadProbeIntegration`
+needs no kernel modules, so a statically linked test binary can run as the init
+of a small initramfs under any distribution kernel image in QEMU.
+
+Call a helper that changes packet data, such as `bpf_skb_pull_data`, before
+parsing, and load the packet pointers again after it through a volatile read.
+Verifiers before Linux 5.10 forget the bounds of a scalar spilled to the stack
+across a helper call, so a parsed offset kept across the pull makes them walk
+the rest of the program once per side of it. For runtime failures, collect:
 
 - active attachment descriptions and effective mechanisms;
 - first error and timestamp, recovery state, and retry deadline;

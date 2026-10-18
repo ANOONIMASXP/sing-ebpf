@@ -24,6 +24,7 @@ func TestAttachTCInterfaceAddsTheICMPEchoReplyFilterWhenEnabled(t *testing.T) {
 	backend := newRealICMPEchoReplyBackend(t)
 	t.Cleanup(func() { _ = backend.Close() })
 
+	forceTCClsact(t)
 	const priority = 2
 	attributes := netlink.NewLinkAttrs()
 	attributes.Name = "sbicmp0"
@@ -122,6 +123,7 @@ func TestAttachTCInterfaceSkipsTheICMPEchoReplyFilterWhenDisabled(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = backend.Close() })
 
+	forceTCClsact(t)
 	const priority = 2
 	attributes := netlink.NewLinkAttrs()
 	attributes.Name = "sbicmp2"

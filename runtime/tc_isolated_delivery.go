@@ -55,13 +55,26 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
 	if err != nil {
 		return nil, err
 	}
+	hostAddress, err := newTCDeliveryHardwareAddress()
+	if err != nil {
+		return nil, E.Cause(err, "generate TC eBPF redirect link address")
+	}
+	peerAddress, err := newTCDeliveryHardwareAddress()
+	if err != nil {
+		return nil, E.Cause(err, "generate TC eBPF delivery link address")
+	}
 	n := d.namespace
 	n.access.RLock()
 	if !n.open {
 		n.access.RUnlock()
 		return nil, os.ErrClosed
 	}
-	veth := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: hostName, MTU: 65535}, PeerName: peerName, PeerNamespace: netlink.NsFd(n.handle)}
+	veth := &netlink.Veth{
+		LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: 65535, HardwareAddr: hostAddress},
+		PeerName:         peerName,
+		PeerHardwareAddr: peerAddress,
+		PeerNamespace:    netlink.NsFd(n.handle),
+	}
 	err = netlink.LinkAdd(veth)
 	n.access.RUnlock()
 	if err != nil {
@@ -110,14 +123,14 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
 	if err != nil {
 		return cleanup(E.Cause(err, "configure TC namespace"))
 	}
-	var mac commonEBPF.MACAddress
-	if len(owner.delivery.Attrs().HardwareAddr) != len(mac) {
+	mac, valid := tcDeliveryMACAddress(owner.delivery)
+	if !valid {
 		return cleanup(E.New("invalid TC namespace peer MAC"))
 	}
-	copy(mac[:], owner.delivery.Attrs().HardwareAddr)
 	if err = d.backend.SetDeliveryInterface(uint32(owner.redirect.Attrs().Index), mac); err != nil {
 		return cleanup(err)
 	}
+	owner.deliveryMAC = mac
 	return owner, nil
 }
 
@@ -278,6 +291,9 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
 	if d.redirect.Attrs().Flags&net.FlagUp == 0 {
 		return false, nil
 	}
+	if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
+		return false, nil
+	}
 	live, err = tcFilterAttached(d.redirect, netlink.HANDLE_MIN_INGRESS, "sb_tc_return", tcReturnFilterHandle, priority)
 	if err != nil || !live {
 		return false, err
@@ -300,6 +316,19 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority 
 		return false, !live, err
 	}
 	changed := false
+	// Anything that changes the private end's address after creation leaves
+	// the backend addressing frames to a MAC the interface no longer accepts.
+	mac, valid := tcDeliveryMACAddress(d.delivery)
+	if !valid {
+		return false, true, nil
+	}
+	if mac != d.deliveryMAC {
+		if err = backend.SetDeliveryInterface(uint32(d.redirect.Attrs().Index), mac); err != nil {
+			return false, false, E.Cause(err, "update TC eBPF delivery address")
+		}
+		d.deliveryMAC = mac
+		changed = true
+	}
 	if d.redirect.Attrs().Flags&net.FlagUp == 0 {
 		if err = netlink.LinkSetUp(d.redirect); err != nil {
 			return false, false, err

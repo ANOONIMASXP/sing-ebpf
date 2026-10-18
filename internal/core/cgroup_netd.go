@@ -36,11 +36,6 @@ import (
 // swaps the owner for its own program, which keeps the mode, and swaps it
 // back on detach.
 //
-// Only the interception backend takes a hook over. Optional components that
-// attach to the same root hooks, such as the process tracker, have a userspace
-// fallback; a program of theirs in netd's place would be an owner that does
-// real work, which the backend would then have to refuse.
-//
 // Vendor and custom-ROM builds of netd differ in program names, BTF and pin
 // layout, so the decision rests on what the owner does, not on what it is
 // called: it must be the single program of a hook in single-program mode, and
@@ -129,7 +124,7 @@ func displaceableCgroupOwner(target int, attachType CiliumEBPF.AttachType, owner
 // findDisplaceableOwner opens the owner and keeps it open for the restore
 // when it is a pass-through. Tests replace it.
 var findDisplaceableOwner = func(attachType CiliumEBPF.AttachType, ownerID CiliumEBPF.ProgramID, flags uint32) (*displacedCgroupOwner, error) {
-	program, err := newProgramFromID(ownerID)
+	program, err := CiliumEBPF.NewProgramFromID(ownerID)
 	if err != nil {
 		return nil, E.Cause(err, "open the program on this hook")
 	}
@@ -389,33 +384,29 @@ var programHasID = func(program *CiliumEBPF.Program, id CiliumEBPF.ProgramID) bo
 	return !ok || programID == id
 }
 
-// restoreNetdOwnerForStaleProgram is used by stale-program reclaim on a hook
-// whose single program is a stale interception program: an earlier backend
+// restoreNetdOwnerForStaleProgram is used by startup reclaim on a hook whose
+// single-program owner is a stale interception program: an earlier backend
 // took the hook over from netd and exited without handing it back. Detaching
 // would leave the hook empty, and an empty hook would let the next attach put
 // it in multi-program mode, which makes a restarting netd abort. Instead the
 // stale program is swapped for netd's pinned program, or, when that is not at
 // hand, for an equivalent pass-through, so the hook stays as netd keeps it.
-// It reports false when the device has no netd, the hook is not one the
-// backend takes over, or the hook is not known to be in single-program mode;
-// the caller then detaches as usual.
-func restoreNetdOwnerForStaleProgram(target int, attachType CiliumEBPF.AttachType) (bool, error) {
+// It reports false when the device has no netd or the hook is not one the
+// backend takes over; the caller then detaches as usual.
+func restoreNetdOwnerForStaleProgram(target int, attachType CiliumEBPF.AttachType, flags uint32) (bool, error) {
 	if _, takeable := netdHookPinPrefixes[attachType]; !takeable || !netdPresent() {
-		return false, nil
-	}
-	flags, err := queryCgroupHookFlags(target, attachType)
-	if err != nil || flags&unix.BPF_F_ALLOW_MULTI != 0 {
 		return false, nil
 	}
 	program := openNetdPinnedProgram(attachType)
 	if program == nil {
+		var err error
 		program, err = newHookPlaceholderProgram(attachType)
 		if err != nil {
 			return false, E.Cause(err, "load pass-through cgroup program")
 		}
 	}
 	defer program.Close()
-	if err = replaceCgroupOwner(target, program, attachType, flags); err != nil {
+	if err := replaceCgroupOwner(target, program, attachType, flags); err != nil {
 		return false, E.Cause(err, "restore netd cgroup program")
 	}
 	return true, nil

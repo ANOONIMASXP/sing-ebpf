@@ -14,6 +14,7 @@ import (
 
 func TestTCProgramRunIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "run unified TC eBPF programs in the kernel")
+	requireTCSocketAssignment(t)
 	policy, err := CompileActionPolicy(ActionPolicy{
 		Local: ActionScope{Default: DecisionIntercept},
 		Shared: ActionScope{
@@ -120,16 +121,31 @@ func TestTCProgramRunIntegration(t *testing.T) {
 
 func TestForceInterceptPolicyPrecedenceIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify ForceIntercept policy precedence in every TC data plane")
+	// Each family carries two force-intercept prefixes, and only the first
+	// of each is answered by ICMP echo reply.
+	destinations := []CIDRDecision{
+		{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass},
+		{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept, EchoReply: true},
+		{Prefix: netip.MustParsePrefix("fd00:198:18::/48"), Action: DecisionIntercept, EchoReply: true},
+		{Prefix: netip.MustParsePrefix("100.64.0.0/10"), Action: DecisionIntercept},
+		{Prefix: netip.MustParsePrefix("fd7a:115c:a1e0::/48"), Action: DecisionIntercept},
+	}
 	policy, err := CompileActionPolicy(ActionPolicy{
-		Local:  ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept}, {Prefix: netip.MustParsePrefix("fd00:198:18::/48"), Action: DecisionIntercept}}},
-		Shared: ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept}, {Prefix: netip.MustParsePrefix("fd00:198:18::/48"), Action: DecisionIntercept}}, SourceMAC: []MACDecision{{Address: MACAddress{0x02, 0, 0, 0, 0, 3}, Action: DecisionIntercept}}},
+		Local:  ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: destinations},
+		Shared: ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: destinations, SourceMAC: []MACDecision{{Address: MACAddress{0x02, 0, 0, 0, 0, 3}, Action: DecisionIntercept}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bypass := []CIDRDecision{{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("fd00:198:18::/48"), Action: DecisionPass}}
+	bypass := []CIDRDecision{
+		{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionPass},
+		{Prefix: netip.MustParsePrefix("fd00:198:18::/48"), Action: DecisionPass},
+		{Prefix: netip.MustParsePrefix("100.64.0.0/10"), Action: DecisionPass},
+		{Prefix: netip.MustParsePrefix("fd7a:115c:a1e0::/48"), Action: DecisionPass},
+	}
 
 	t.Run("socket_assign", func(t *testing.T) {
+		requireTCSocketAssignment(t)
 		backend, err := PrepareTC(TCConfig{
 			DeliveryInterface: 1,
 			ListenerPort:      65531,
@@ -200,11 +216,18 @@ func forceInterceptPolicyPrecedencePackets() map[string][]byte {
 		"IPv6": testIPv6TCPPacket(
 			netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("fd00:198:18::1"), 53001, 53, nil,
 		),
+		"IPv4 second prefix": testIPv4TCPPacket(
+			netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("100.64.1.1"), 53002, 53,
+		),
+		"IPv6 second prefix": testIPv6TCPPacket(
+			netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("fd7a:115c:a1e0::1"), 53003, 53, nil,
+		),
 	}
 }
 
 func TestTCIPv6PathIsolationIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify TC eBPF IPv6 path isolation")
+	requireTCSocketAssignment(t)
 	packet := testIPv6TCPPacket(
 		netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("2001:4860:4860::8888"), 53000, 443, nil,
 	)
@@ -261,6 +284,7 @@ func TestTCIPv6PathIsolationIntegration(t *testing.T) {
 
 func TestTCFragmentPolicyIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify TC eBPF fragment policy")
+	requireTCSocketAssignment(t)
 	backend, err := PrepareTC(TCConfig{
 		DeliveryInterface: 1,
 		ListenerPort:      65531,

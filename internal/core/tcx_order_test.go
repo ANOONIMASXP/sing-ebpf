@@ -47,3 +47,36 @@ func TestTCXPriorityAnchor(t *testing.T) {
 		t.Errorf("an unreadable program gave %v, want its error", err)
 	}
 }
+
+func TestAttachTCXOrderedQueryErrors(t *testing.T) {
+	originalQuery := queryTCXPrograms
+	t.Cleanup(func() { queryTCXPrograms = originalQuery })
+
+	for _, testCase := range []struct {
+		name            string
+		queryErr        error
+		wantUnsupported bool
+	}{
+		{name: "unsupported", queryErr: CiliumEBPF.ErrNotSupported, wantUnsupported: true},
+		{name: "eopnotsupp", queryErr: unix.EOPNOTSUPP, wantUnsupported: true},
+		{name: "enosys", queryErr: unix.ENOSYS, wantUnsupported: true},
+		{name: "permission", queryErr: unix.EPERM},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			queryTCXPrograms = func(link.QueryOptions) (*link.QueryResult, error) {
+				return nil, testCase.queryErr
+			}
+			_, err := AttachTCXOrdered(1, CiliumEBPF.AttachTCXEgress, &CiliumEBPF.Program{}, 100)
+			if err == nil {
+				t.Fatal("AttachTCXOrdered unexpectedly succeeded")
+			}
+			if testCase.wantUnsupported {
+				if errors.Is(err, ErrTCXOrderUnavailable) {
+					t.Fatalf("unsupported query error was classified as ordered TCX unavailable: %v", err)
+				}
+			} else if !errors.Is(err, ErrTCXOrderUnavailable) {
+				t.Fatalf("query error = %v, want ErrTCXOrderUnavailable", err)
+			}
+		})
+	}
+}

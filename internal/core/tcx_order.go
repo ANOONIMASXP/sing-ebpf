@@ -62,13 +62,17 @@ func AttachTCXOrdered(interfaceIndex int, attachType CiliumEBPF.AttachType, prog
 	for attempt := 1; ; attempt++ {
 		result, queryErr := queryTCXPrograms(link.QueryOptions{Target: interfaceIndex, Attach: attachType})
 		if queryErr != nil {
-			// A kernel without TCX already rejects the query. The plain attach
-			// reports why in the form callers recognize.
-			attached, err := attachTCX(link.TCXOptions{Interface: interfaceIndex, Program: program, Attach: attachType})
-			if err != nil {
-				return nil, err
+			// Querying the existing hook is required only for ordered TCX
+			// insertion.  A permission failure while reading program IDs must
+			// not turn a usable TCX kernel into a startup failure: callers can
+			// preserve the priority contract through clsact instead.  Keep
+			// explicit unsupported errors recognizable so they can update the
+			// process-wide TCX capability cache.
+			if errors.Is(queryErr, CiliumEBPF.ErrNotSupported) ||
+				errors.Is(queryErr, unix.EOPNOTSUPP) || errors.Is(queryErr, unix.ENOSYS) {
+				return nil, queryErr
 			}
-			return nil, E.Errors(E.Cause(queryErr, "query TCX programs"), attached.Close())
+			return nil, E.Errors(ErrTCXOrderUnavailable, E.Cause(queryErr, "query TCX programs"))
 		}
 		if !markerReady {
 			if err := ensureTCXPriorityMarker(program, priority); err != nil {

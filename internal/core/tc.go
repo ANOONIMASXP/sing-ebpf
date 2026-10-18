@@ -803,7 +803,9 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	if err = b.sweepReturnRoutesLocked(max(maxIdle, time.Second), fallbackBudget, &result); err != nil {
 		return result, err
 	}
-	result.FailureMap = ""
+	if result.Failure == "" {
+		result.FailureMap = ""
+	}
 	return result, nil
 }
 

@@ -287,3 +287,17 @@ func TestSweepAssignmentsPreservesCoalescedActivity(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSweepAssignmentsPreservesReturnFailureMap(t *testing.T) {
+	backend := newTestAssignmentBackend(t)
+	backend.assignmentCapacity = 64
+	delete(backend.runtime.maps, "tc_return")
+
+	result, err := backend.SweepAssignments(time.Second, 64)
+	if err == nil {
+		t.Fatal("sweep without the return map succeeded")
+	}
+	if result.Failure != TCAssignmentSweepFailureClosed || result.FailureMap != "sb_tc_return" {
+		t.Fatalf("sweep failure = %+v, want closed sb_tc_return", result)
+	}
+}

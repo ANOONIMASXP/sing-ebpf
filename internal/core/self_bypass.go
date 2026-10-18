@@ -237,7 +237,7 @@ func (b *SelfBypass) AttachCgroup(config SelfBypassCgroupConfig) error {
 		if socketAddrErr == nil {
 			socketAddrErr = b.verifyOwnerMarking(true, config)
 			if socketAddrErr == nil {
-				if b.attachCgroupRelease(cgroupPath) == nil {
+				if b.attachCgroupRelease(cgroupPath, false) == nil {
 					b.mode.Store(uint32(SelfBypassCgroupSocketAddrRelease))
 				} else {
 					// Keep the address hooks active when the optional release hook is
@@ -258,7 +258,11 @@ func (b *SelfBypass) AttachCgroup(config SelfBypassCgroupConfig) error {
 
 	// A release-only hook is safe on a shared cgroup: it only deletes entries
 	// whose cookies are already present in our map, and never marks sockets.
-	if releaseErr := b.attachCgroupRelease(cgroupPath); releaseErr == nil {
+	// The process cgroup is shared in this branch.  A release-only helper is
+	// optional and must never turn a shared hook into legacy single-program
+	// mode, otherwise the interception backend cannot attach its own
+	// multi-program/link hook afterwards.
+	if releaseErr := b.attachCgroupRelease(cgroupPath, true); releaseErr == nil {
 		b.mode.Store(uint32(SelfBypassUserspaceRelease))
 		return nil
 	} else {
@@ -313,12 +317,17 @@ func (b *SelfBypass) attachCgroupSocket(path string, ownerTGID uint32) error {
 	return nil
 }
 
-func (b *SelfBypass) attachCgroupRelease(path string) error {
+func (b *SelfBypass) attachCgroupRelease(path string, shared bool) error {
 	program, err := newSelfBypassReleaseProgram(b.sockets.FD())
 	if err != nil {
 		return err
 	}
-	programLink, err := attachCgroupProgram(path, program, CiliumEBPF.AttachCgroupInetSockRelease)
+	var programLink cgroupProgramLink
+	if shared {
+		programLink, err = attachCgroupProgramShared(path, program, CiliumEBPF.AttachCgroupInetSockRelease)
+	} else {
+		programLink, err = attachCgroupProgram(path, program, CiliumEBPF.AttachCgroupInetSockRelease)
+	}
 	if err != nil {
 		_ = program.Close()
 		return E.Cause(err, "attach eBPF self-bypass socket-release cleanup hook")

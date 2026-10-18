@@ -9,12 +9,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	CiliumEBPF "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/features"
+	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 )
+
+// requireOwnerMarkingHelper skips where cgroup programs of programType cannot
+// call bpf_get_current_pid_tgid, as on Linux 4.19 and 5.4. The
+// marking hooks then do not load and AttachCgroup keeps userspace
+// registration, which TestSelfBypassFallsBackWhenHooksMarkNothing covers.
+func requireOwnerMarkingHelper(t *testing.T, programType CiliumEBPF.ProgramType) {
+	t.Helper()
+	if err := features.HaveProgramHelper(programType, asm.FnGetCurrentPidTgid); err != nil {
+		t.Skipf("%s programs cannot read the current thread group: %v", programType, err)
+	}
+}
 
 const selfBypassHelperEnv = "SING_EBPF_SELF_BYPASS_HELPER"
 
@@ -137,6 +153,8 @@ func selfBypassMarked(t *testing.T, bypass *SelfBypass, cookie uint64) bool {
 // unmarked, so local interception still applies to them.
 func TestSelfBypassCgroupMarksOnlyOwnerProcess(t *testing.T) {
 	requireEBPFIntegration(t, "attach self-bypass hooks to an exclusive process cgroup")
+	requireOwnerMarkingHelper(t, CiliumEBPF.CGroupSock)
+	requireOwnerMarkingHelper(t, CiliumEBPF.CGroupSockAddr)
 	if _, err := selfBypassOwnerTGID(); err != nil {
 		t.Skipf("automatic self-bypass marking is unavailable: %v", err)
 	}
@@ -173,6 +191,7 @@ func TestSelfBypassCgroupMarksOnlyOwnerProcess(t *testing.T) {
 // fallback used on kernels without socket create/release hooks.
 func TestSelfBypassSocketAddrHooksMarkOnlyOwnerProcess(t *testing.T) {
 	requireEBPFIntegration(t, "attach self-bypass socket-address hooks")
+	requireOwnerMarkingHelper(t, CiliumEBPF.CGroupSockAddr)
 	owner, err := selfBypassOwnerTGID()
 	if err != nil {
 		t.Skipf("automatic self-bypass marking is unavailable: %v", err)
@@ -240,6 +259,48 @@ func TestSelfBypassFallsBackWhenHooksMarkNothing(t *testing.T) {
 	defer unix.Close(fd)
 	if selfBypassMarked(t, bypass, cookie) {
 		t.Fatal("a removed hook still marked a socket")
+	}
+}
+
+// TestSelfBypassSharedReleaseNeverLeavesExclusiveHook emulates a kernel that
+// rejects both BPF_LINK_CREATE and BPF_F_ALLOW_MULTI on a process cgroup that
+// other processes share. The optional release-only hook must then stay off:
+// an unflagged attach would put the hook in single-program mode and lock the
+// interception backend out of it.
+func TestSelfBypassSharedReleaseNeverLeavesExclusiveHook(t *testing.T) {
+	requireEBPFIntegration(t, "load the self-bypass release program")
+	enterDedicatedSelfBypassCgroup(t, 303)
+	// A second member makes the process cgroup shared.
+	startSelfBypassTestHelper(t)
+
+	bypass, err := NewSelfBypassWithCapacity(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bypass.Close()
+	if _, err = bypass.PreparedMap(); err != nil {
+		t.Fatal(err)
+	}
+	program, err := newSelfBypassReleaseProgram(bypass.sockets.FD())
+	if err != nil {
+		t.Skipf("kernel cannot load the socket-release program: %v", err)
+	}
+	_ = program.Close()
+
+	var flags []uint32
+	replaceCgroupAttachOperations(t, unix.EINVAL, func(current link.RawAttachProgramOptions) error {
+		flags = append(flags, current.Flags)
+		if current.Flags == unix.BPF_F_ALLOW_MULTI {
+			return unix.EINVAL
+		}
+		return nil
+	})
+	attachErr := bypass.AttachCgroup(SelfBypassCgroupConfig{EnableTCP: true, EnableUDP: true})
+	if mode := bypass.Mode(); mode != SelfBypassUserspace {
+		t.Fatalf("mode %s on a shared cgroup without multi-program attach, want %s: %v", mode, SelfBypassUserspace, attachErr)
+	}
+	if !slices.Equal(flags, []uint32{unix.BPF_F_ALLOW_MULTI}) {
+		t.Fatalf("legacy attach flags = %v, want only BPF_F_ALLOW_MULTI", flags)
 	}
 }
 

@@ -44,15 +44,27 @@ func TestLocalRouteSetReachesListenerFromBoundSockets(t *testing.T) {
 	}
 
 	// The loopback route alone is what the kernel used before.
-	if reply, replyErr := routeTestUDPExchange(routeTestIPv4Destination, routeTestUnicastInterface, uplink, 300*time.Millisecond); replyErr == nil {
-		t.Fatalf("a socket bound with IP_UNICAST_IF reached the listener through the loopback route alone: %q", reply)
+	for _, destination := range []netip.AddrPort{routeTestIPv4Destination, routeTestIPv6Destination} {
+		if reply, replyErr := routeTestUDPExchange(destination, routeTestBindToDevice, uplink, 300*time.Millisecond); replyErr == nil {
+			t.Fatalf("a socket bound with SO_BINDTODEVICE reached %s through the loopback route alone: %q", destination, reply)
+		}
+	}
+	// Older kernels, such as 5.10, ignore IP_UNICAST_IF and IPV6_UNICAST_IF on
+	// a connected UDP socket, which then routes like an unbound one.
+	unicastInterfaceHonored := make(map[bool]bool)
+	for _, destination := range []netip.AddrPort{routeTestIPv4Destination, routeTestIPv6Destination} {
+		reply, replyErr := routeTestUDPExchange(destination, routeTestUnicastInterface, uplink, 300*time.Millisecond)
+		unicastInterfaceHonored[destination.Addr().Is6()] = replyErr != nil
+		if replyErr == nil {
+			t.Logf("this kernel ignores the unicast interface of a connected UDP socket to %s; it arrived from %s", destination, reply)
+		}
 	}
 
 	changed, err := routes.ReconcileInterfaceRoutes()
 	if err != nil || !changed {
 		t.Fatalf("ReconcileInterfaceRoutes = %v, %v; want the interface routes installed", changed, err)
 	}
-	requireRouteTestBoundSocketsReach(t, uplink, "10.252.0.1", "fd00:5b::1")
+	requireRouteTestBoundSocketsReach(t, uplink, "10.252.0.1", "fd00:5b::1", unicastInterfaceHonored)
 	if changed, err = routes.ReconcileInterfaceRoutes(); err != nil || changed {
 		t.Fatalf("a second ReconcileInterfaceRoutes = %v, %v; want nothing left to change", changed, err)
 	}
@@ -71,7 +83,7 @@ func TestLocalRouteSetReachesListenerFromBoundSockets(t *testing.T) {
 	if changed, err = routes.ReconcileInterfaceRoutes(); err != nil || !changed {
 		t.Fatalf("ReconcileInterfaceRoutes after an address change = %v, %v; want the routes restored", changed, err)
 	}
-	requireRouteTestBoundSocketsReach(t, uplink, "10.252.1.9", "fd00:5b::9")
+	requireRouteTestBoundSocketsReach(t, uplink, "10.252.1.9", "fd00:5b::9", unicastInterfaceHonored)
 
 	if err = netlink.LinkSetDown(uplink); err != nil {
 		t.Fatalf("take the uplink down: %v", err)
@@ -157,7 +169,10 @@ func (b routeTestBinding) String() string {
 	}
 }
 
-func requireRouteTestBoundSocketsReach(t *testing.T, uplink netlink.Link, ipv4Source, ipv6Source string) {
+// unicastInterfaceHonored reports, keyed by IPv6, whether the kernel routes a
+// connected UDP socket by its unicast interface; where it does not, that socket
+// only has to reach the listener.
+func requireRouteTestBoundSocketsReach(t *testing.T, uplink netlink.Link, ipv4Source, ipv6Source string, unicastInterfaceHonored map[bool]bool) {
 	t.Helper()
 	for _, destination := range []netip.AddrPort{routeTestIPv4Destination, routeTestIPv6Destination} {
 		wantSource := ipv4Source
@@ -168,6 +183,9 @@ func requireRouteTestBoundSocketsReach(t *testing.T, uplink netlink.Link, ipv4So
 			reply, err := routeTestUDPExchange(destination, binding, uplink, 2*time.Second)
 			if err != nil {
 				t.Fatalf("UDP %s to %s: %v", binding, destination, err)
+			}
+			if binding == routeTestUnicastInterface && !unicastInterfaceHonored[destination.Addr().Is6()] {
+				continue
 			}
 			if binding != routeTestUnbound && reply != wantSource {
 				t.Fatalf("UDP %s to %s arrived from %s, want the interface address %s", binding, destination, reply, wantSource)

@@ -158,12 +158,20 @@ func (d *tcDeliveryLink) configureIsolatedPeer(repair bool) (bool, error) {
 			}
 		}
 	}
-	for _, setting := range []struct{ device, name, value string }{
-		{"all", "rp_filter", "0"}, {"default", "rp_filter", "0"},
-		{d.deliveryName, "rp_filter", "0"}, {d.deliveryName, "accept_local", "1"},
-		{d.deliveryName, "route_localnet", "1"},
+	for _, setting := range []struct{ path, value string }{
+		{tcInterfaceSysctlPath("all", "rp_filter"), "0"}, {tcInterfaceSysctlPath("default", "rp_filter"), "0"},
+		{tcInterfaceSysctlPath(d.deliveryName, "rp_filter"), "0"}, {tcInterfaceSysctlPath(d.deliveryName, "accept_local"), "1"},
+		{tcInterfaceSysctlPath(d.deliveryName, "route_localnet"), "1"},
+		// The transparent listeners close first whenever the remote server
+		// does, so their sockets would enter TIME_WAIT. A client reusing that
+		// tuple then sends a SYN the delivery lookup assigns to the TIME_WAIT
+		// socket; the kernel only recycles one for a listener on the original
+		// destination port, which the transparent listener is not, so it drops
+		// the SYN and the client retries a second later. The namespace holds
+		// nothing but these sockets, so it keeps no TIME_WAIT state.
+		{tcNamespaceTimeWaitPath, "0"},
 	} {
-		path := tcInterfaceSysctlPath(setting.device, setting.name)
+		path := setting.path
 		value, err := os.ReadFile(path)
 		if err != nil {
 			return false, err

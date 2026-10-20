@@ -436,7 +436,7 @@ func TestKernelProgramNames(t *testing.T) {
 	}
 	seen := make(map[string]struct{}, len(names))
 	for _, name := range names {
-		if len(name) == 0 || len(name) > 15 {
+		if len(name) == 0 || len(name) > kernelObjectNameLimit {
 			t.Fatalf("invalid kernel program name %q: length %d", name, len(name))
 		}
 		if _, exists := seen[name]; exists {

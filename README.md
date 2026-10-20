@@ -142,6 +142,10 @@ use its `Path()` for TCP, UDP and transparent UDP reply sockets, and pass the na
 Outbound dialers stay in the host namespace. Close the runtime and sockets
 before closing the caller-owned namespace. No named namespace, mount point,
 holder process, host NAT rule, or host-wide sysctl change is needed.
+The namespace keeps no TIME_WAIT state (`tcp_max_tw_buckets=0`): its
+transparent listeners close first whenever the remote server does, and a
+client reusing such a tuple would otherwise have its SYN assigned to a
+TIME_WAIT socket the kernel cannot hand to a listener on another port.
 Bind isolated UDP listeners to `127.0.0.1` / `::1`; TCP listeners remain wildcard.
 The UDP lookup uses loopback without changing the received packet's tuple,
 avoiding conflicts when a remote UDP endpoint has the listener's own port.

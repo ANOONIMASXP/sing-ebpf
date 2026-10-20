@@ -9,10 +9,16 @@ import (
 )
 
 func TestTCABI(t *testing.T) {
-	if size := unsafe.Sizeof(forceInterceptSlot{}); size != 40 {
-		t.Fatalf("unexpected force-intercept slot size: %d", size)
+	if size := unsafe.Sizeof(tcReturnValue{}); size != 40 {
+		t.Fatalf("unexpected TC return value size: %d", size)
 	}
-	if size := unsafe.Sizeof(tcControl{}); size != 112 {
+	if offset := unsafe.Offsetof(tcReturnValue{}.InterfaceIndex); offset != 16 {
+		t.Fatalf("unexpected TC return ifindex offset: %d", offset)
+	}
+	if offset := unsafe.Offsetof(tcReturnValue{}.DestinationMAC); offset != 30 {
+		t.Fatalf("unexpected TC return MAC offset: %d", offset)
+	}
+	if size := unsafe.Sizeof(tcControl{}); size != 32 {
 		t.Fatalf("unexpected TC control size: %d", size)
 	}
 	if offset := unsafe.Offsetof(tcControl{}.RoutingMark); offset != 12 {
@@ -23,9 +29,6 @@ func TestTCABI(t *testing.T) {
 	}
 	if offset := unsafe.Offsetof(tcControl{}.ListenerPort); offset != 16 {
 		t.Fatalf("unexpected TC listener port offset: %d", offset)
-	}
-	if offset := unsafe.Offsetof(tcControl{}.ForceIntercept); offset != 30 {
-		t.Fatalf("unexpected TC ForceIntercept offset: %d", offset)
 	}
 	if size := unsafe.Sizeof(tcAssignKey{}); size != 44 {
 		t.Fatalf("unexpected TC assignment key size: %d", size)

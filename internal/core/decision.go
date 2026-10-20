@@ -27,10 +27,11 @@ func (d Decision) Valid() bool {
 type CIDRDecision struct {
 	Prefix netip.Prefix
 	Action Decision
-	// EchoReply selects an intercept destination prefix as the one whose ICMP
-	// echo requests are answered locally when ICMP echo reply is enabled. When
-	// no decision of an address family sets it, a sole intercept prefix of
-	// that family is answered.
+	// EchoReply limits ICMP echo reply to the intercept destination prefixes
+	// that set it, for example a FakeIP range intercepted beside a VPN range
+	// whose hosts are real. When no intercept decision of a scope and address
+	// family sets it, ICMP echo reply answers every intercept prefix of that
+	// family. It is valid only on intercept destination decisions.
 	EchoReply bool
 }
 
@@ -40,6 +41,10 @@ type PortDecision struct {
 	Protocol uint8
 	Port     uint16
 	Action   Decision
+	// AfterSelectors applies this action only after UID/source selection.
+	// Otherwise it precedes selectors. Safety and mandatory destination
+	// interception retain precedence in either case.
+	AfterSelectors bool
 }
 
 // UIDDecision is a UID range match with an already compiled final action.
@@ -58,6 +63,10 @@ type MACDecision struct {
 // ActionScope contains only match primitives and their final actions. It does
 // not encode include/exclude, DNS, FakeIP, or rule-set semantics.
 type ActionScope struct {
+	// Default applies when no UID (local) or source CIDR/MAC (shared)
+	// decision matches. Matching pass decisions take precedence over intercept
+	// decisions; an intercept match in either source dimension selects a packet.
+	// Destination interception and priority port actions precede this stage.
 	Default         Decision
 	UID             []UIDDecision
 	SourceCIDR      []CIDRDecision
@@ -69,10 +78,8 @@ type ActionScope struct {
 // ActionPolicy is the policy input for the action-only API. The caller owns
 // configuration semantics and supplies the final action for every rule.
 type ActionPolicy struct {
-	EnableTCP bool
-	EnableUDP bool
-	Local     ActionScope
-	Shared    ActionScope
+	Local  ActionScope
+	Shared ActionScope
 }
 
 func compileDestinationPassDecisions(decisions []CIDRDecision) (dualStackCIDRPrefixes, error) {

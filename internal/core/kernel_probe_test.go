@@ -241,7 +241,7 @@ func TestNormalizeProbeDataPlanes(t *testing.T) {
 		{name: "default local", options: KernelProbeOptions{Mode: KernelProbeModeLocal}, local: KernelProbeDataPlaneCgroup},
 		{name: "default shared", options: KernelProbeOptions{Mode: KernelProbeModeShared}, shared: KernelProbeDataPlanePacketRewrite},
 		{name: "explicit cgroup and rewrite", options: KernelProbeOptions{LocalDataPlane: KernelProbeDataPlaneCgroup, SharedDataPlane: KernelProbeDataPlanePacketRewrite}, local: KernelProbeDataPlaneCgroup, shared: KernelProbeDataPlanePacketRewrite},
-		{name: "local only", options: KernelProbeOptions{LocalDataPlane: KernelProbeDataPlaneTC}, local: KernelProbeDataPlaneTC},
+		{name: "local only", options: KernelProbeOptions{LocalDataPlane: KernelProbeDataPlaneSocketAssign}, local: KernelProbeDataPlaneSocketAssign},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -260,7 +260,7 @@ func TestNormalizeProbeDataPlanes(t *testing.T) {
 }
 
 func TestKernelProbePlanSeparatesTCDataPlanes(t *testing.T) {
-	local := newKernelProbePlan(KernelProbeDataPlaneTC, "", true, true, KernelProbeOptions{})
+	local := newKernelProbePlan(KernelProbeDataPlaneSocketAssign, "", true, true, KernelProbeOptions{})
 	if !local.localTC || !local.needsSocketAssignment() || !local.needsTCProgram() ||
 		local.localCgroup || local.sharedSocketAssign || local.sharedPacketRewrite {
 		t.Fatalf("unexpected local TC plan: %+v", local)

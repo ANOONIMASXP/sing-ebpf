@@ -55,6 +55,8 @@ type SharedPacketRewriteBackend struct {
 	flowWake            chan struct{}
 	flowSweepAccess     sync.Mutex
 	flowSweepScratch    mapScanScratch[sharedNetworkOriginalKey, sharedNetworkTokenValue]
+	purgeSweepScratch   mapScanScratch[sharedNetworkOriginalKey, sharedNetworkTokenValue]
+	purgeInterfaceIndex uint32
 	flowSweepCandidates []sharedNetworkFlowEntry
 	flowSweepRemoved    uint32
 	runtime             *sharedPacketRewriteRuntime
@@ -81,7 +83,7 @@ type SharedPacketRewriteBackend struct {
 	icmpEchoReply *ICMPEchoReplyBackend
 }
 
-func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConfig) (*SharedPacketRewriteBackend, error) {
+func PrepareSharedPacketRewrite(config SharedPacketRewriteConfig) (*SharedPacketRewriteBackend, error) {
 	redirectIPv4 := config.RedirectIPv4
 	redirectIPv6 := config.RedirectIPv6
 	policy := config.Policy
@@ -139,6 +141,7 @@ func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConf
 		len(policy.includeSourceMAC),
 		len(policy.excludeSourceMAC),
 		len(policy.sharedBypassPortEntries),
+		policy.sharedForce,
 		bypassIPv4Map,
 		bypassIPv6Map,
 	)
@@ -181,20 +184,19 @@ func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConf
 		flowWake:        make(chan struct{}, 1),
 	}
 	backend.control.ListenerPort = config.ListenerPort
-	backend.control.DNSMode = policy.sharedDNSMode
 	backend.control.UDPTimeoutSeconds = udpTimeoutSeconds
 	backend.control.Flags = (policyVector{
 		EnableTCP:           config.EnableTCP,
 		EnableUDP:           config.EnableUDP,
 		EnableIPv4:          redirectIPv4.IsValid(),
 		EnableSharedIPv6:    redirectIPv6.IsValid(),
-		SharedBypassPrivate: policy.sharedBypassPrivate,
+		SharedDefaultBypass: policy.sharedDefaultBypass,
 		IncludeSource:       len(policy.includeSource.ipv4)+len(policy.includeSource.ipv6) > 0,
 		ExcludeSource:       len(policy.excludeSource.ipv4)+len(policy.excludeSource.ipv6) > 0,
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,
 		ExcludeSourceMAC:    len(policy.excludeSourceMAC) > 0,
-		ForceInterceptIPv4:  policy.forceIntercept.enabledIPv4(),
-		ForceInterceptIPv6:  policy.forceIntercept.enabledIPv6(),
+		ForceInterceptIPv4:  len(policy.sharedForce.ipv4) > 0,
+		ForceInterceptIPv6:  len(policy.sharedForce.ipv6) > 0,
 	}).sharedFlags()
 	if redirectIPv4.IsValid() {
 		backend.control.TokenIPv4Prefix = redirectIPv4.Addr().As4()
@@ -204,7 +206,6 @@ func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConf
 		backend.control.TokenIPv6Prefix = redirectIPv6.Addr().As16()
 		backend.control.TokenIPv6PrefixBits = uint8(redirectIPv6.Bits())
 	}
-	backend.control.ForceIntercept = policy.forceIntercept.controlSlots()
 	if err = backend.initializeSourceCIDRPolicy(policy.includeSource, policy.excludeSource); err != nil {
 		_ = backend.Close()
 		return nil, err
@@ -214,7 +215,8 @@ func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConf
 		return nil, err
 	}
 	if err = populateCompiledPolicyMaps(policyMapTargets{
-		Scope:            "shared packet-rewrite",
+		Scope:           "shared packet-rewrite",
+		SharedForceIPv4: backend.runtime.maps["shared_force4"], SharedForceIPv6: backend.runtime.maps["shared_force6"],
 		SharedPort:       backend.runtime.maps["shared_bypass_port"],
 		SharedBypassIPv4: backend.bypassIPv4Map,
 		SharedBypassIPv6: backend.bypassIPv6Map,
@@ -233,7 +235,7 @@ func PrepareSharedPacketRewrite(_ *CgroupBackend, config SharedPacketRewriteConf
 	if config.ICMPEchoReply {
 		backend.icmpEchoReply, err = PrepareICMPEchoReply(
 			redirectIPv4.IsValid(), false, redirectIPv6.IsValid(),
-			policy.forceIntercept.echoReplyIPv4, policy.forceIntercept.echoReplyIPv6,
+			CompiledPolicy{sharedForce: policy.sharedForce, sharedEchoReply: policy.sharedEchoReply},
 		)
 		if err != nil {
 			_ = backend.Close()
@@ -249,11 +251,12 @@ func prepareSharedNetworkRuntime(
 	includeSourceMACEntries int,
 	excludeSourceMACEntries int,
 	bypassPortEntries int,
+	force dualStackCIDRPrefixes,
 	bypassIPv4Map *CiliumEBPF.Map,
 	bypassIPv6Map *CiliumEBPF.Map,
 ) error {
 	var err error
-	runtimeState.maps, err = loadObjectMaps(loadSharedNetwork, map[string]mapSpecOverride{
+	overrides := map[string]mapSpecOverride{
 		"shared_control":             {name: "sb_sh_control", mapType: CiliumEBPF.Array, maxEntries: 1},
 		"shared_stats":               {name: "sb_sh_stats", mapType: CiliumEBPF.PerCPUArray, maxEntries: sharedNetworkStatCount},
 		"shared_flow_by_original":    {name: "sb_sh_orig", mapType: CiliumEBPF.Hash, maxEntries: capacity.Proxy, flags: bpfFlagNoPrealloc},
@@ -269,7 +272,9 @@ func prepareSharedNetworkRuntime(
 		"shared_exclude_source_mac":  {name: "sb_sh_exmac", mapType: CiliumEBPF.Hash, maxEntries: sharedSourceMACMapCapacity(excludeSourceMACEntries)},
 		"shared_bypass_port":         {name: "sb_sh_port", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(bypassPortEntries), 1), flags: bpfFlagNoPrealloc},
 		"shared_scratch":             {name: "sb_sh_scratch", mapType: CiliumEBPF.PerCPUArray, maxEntries: 1},
-	})
+	}
+	addForceMapOverrides(overrides, "shared", "sb_sh_force", force)
+	runtimeState.maps, err = loadObjectMaps(loadSharedNetwork, overrides)
 	if err != nil {
 		return err
 	}
@@ -525,6 +530,8 @@ func (b *SharedPacketRewriteBackend) Close() error {
 	b.flowSweepScratch = mapScanScratch[sharedNetworkOriginalKey, sharedNetworkTokenValue]{}
 	b.flowSweepCandidates = nil
 	b.flowSweepRemoved = 0
+	b.purgeSweepScratch = mapScanScratch[sharedNetworkOriginalKey, sharedNetworkTokenValue]{}
+	b.purgeInterfaceIndex = 0
 	return closeErr
 }
 

@@ -3,11 +3,9 @@
 package runtime
 
 import (
-	"errors"
 	"hash/fnv"
 	"io"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -15,8 +13,8 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-// conf.all.rp_filter and an interface's route_localnet are single values that
-// every sing-ebpf runtime in the network namespace depending on them shares.
+// An interface's route_localnet is a single value that every sing-ebpf
+// runtime in the network namespace depending on it shares.
 // Every runtime that depends on such a value holds a lease on it for as long as
 // it does. The lease carries the value to restore once nobody depends on the
 // setting any more: the original the holder found when it changed the setting,
@@ -99,93 +97,14 @@ func readTCSysctl(path string) (string, error) {
 	return strings.TrimSpace(string(value)), nil
 }
 
-// claimAggregateRPFilter lowers conf.all.rp_filter for this delivery interface
-// and holds a lease on the lowered value. It reports whether it changed any
-// setting.
-func (d *tcDeliveryLink) claimAggregateRPFilter() (bool, error) {
-	path := tcInterfaceSysctlPath("all", "rp_filter")
-	key := tcSysctlLeaseKey(path)
-	if d.globalLease != nil {
-		// The lease keeps every other runtime from restoring the aggregate
-		// filter, so a repair round only has work when it was raised again.
-		value, err := readTCSysctl(path)
-		if errors.Is(err, os.ErrNotExist) || err == nil && value == "0" {
-			return false, nil
-		}
-	}
-	mutex, err := lockTCSysctlLease(key)
-	if err != nil {
-		return false, err
-	}
-	defer mutex.Close()
-	inherit := d.globalLease == nil
-	states, err := clearTCAggregateRPFilter(d.deliveryName)
-	d.globalSysctls = appendTCSysctlStates(d.globalSysctls, states)
-	changed := len(states) > 0
-	if err != nil {
-		return changed, err
-	}
-	var restore string
-	if index := slices.IndexFunc(d.globalSysctls, func(state tcSysctlState) bool {
-		return state.path == path
-	}); index >= 0 {
-		restore = d.globalSysctls[index].original
-	} else if !inherit {
-		restore = d.globalLease.Value()
-	} else {
-		restore = inheritedTCSysctlRestore(key)
-	}
-	return changed, renewTCSysctlLease(key, &d.globalLease, restore)
-}
-
-// releaseAggregateRPFilter gives up this delivery interface's claim on the
-// lowered aggregate reverse-path filter.
-func (d *tcDeliveryLink) releaseAggregateRPFilter() error {
-	if len(d.globalSysctls) == 0 && d.globalLease == nil {
-		return nil
-	}
-	path := tcInterfaceSysctlPath("all", "rp_filter")
-	key := tcSysctlLeaseKey(path)
-	mutex, err := lockTCSysctlLease(key)
-	if err != nil {
-		return err
-	}
-	defer mutex.Close()
-	if !lastTCSysctlLease(key, d.globalLease) {
-		// A running runtime may still need the aggregate filter lowered. The
-		// interfaces pinned here keep the previous aggregate value, which is
-		// the effective filter they had before it was lowered and have again
-		// once the last runtime restores it.
-		d.globalSysctls = nil
-		return closeOwned(&d.globalLease)
-	}
-	recorded := slices.ContainsFunc(d.globalSysctls, func(state tcSysctlState) bool {
-		return state.path == path
-	})
-	if err = restoreTCSysctlStatesOwned(&d.globalSysctls); err != nil {
-		return err
-	}
-	if !recorded && d.globalLease != nil && d.globalLease.Value() != tcSysctlLeaseNoRestore {
-		// Inherited from a runtime that left while this one was running.
-		if err = restoreTCSysctlStates([]tcSysctlState{{
-			path:     path,
-			original: d.globalLease.Value(),
-			applied:  "0",
-		}}); err != nil {
-			return err
-		}
-	}
-	return closeOwned(&d.globalLease)
-}
-
 // claimSharedRewriteLocalnet enables route_localnet on the interface and holds
 // a lease on it.
 func claimSharedRewriteLocalnet(interfaceName string, lease **core.InstanceLease) error {
 	path := sharedRewriteLocalnetPath(interfaceName)
 	key := tcSysctlLeaseKey(path)
 	if *lease != nil {
-		// As for the aggregate filter, the lease keeps it enabled for this
-		// runtime unless something else disabled it.
+		// The lease keeps every other runtime from restoring the setting, so a
+		// repair round only has work when something else disabled it.
 		if value, err := readTCSysctl(path); err == nil && value == "1" {
 			return nil
 		}

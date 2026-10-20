@@ -495,6 +495,9 @@ func (b *SharedPacketRewriteBackend) SweepOrphanedFlows(
 		UsageKnown: scan.Complete,
 	}
 	var sweepErr error
+	if scan.Restarted {
+		b.flowSweepRemoved = 0
+	}
 	for _, entry := range b.flowSweepCandidates {
 		removed, retained, removeErr := b.removeOrphanedFlowCandidate(mapFD, entry)
 		if retained {
@@ -543,7 +546,11 @@ func (b *SharedPacketRewriteBackend) PurgeInterfaceFlows(interfaceIndex uint32, 
 		return 0, false, errBackendClosed
 	}
 	b.flowSweepCandidates = b.flowSweepCandidates[:0]
-	scan, err := b.flowSweepScratch.scan(
+	if b.purgeInterfaceIndex != interfaceIndex {
+		b.purgeSweepScratch = mapScanScratch[sharedNetworkOriginalKey, sharedNetworkTokenValue]{}
+		b.purgeInterfaceIndex = interfaceIndex
+	}
+	scan, err := b.purgeSweepScratch.scan(
 		b.runtime.maps["shared_flow_by_original"],
 		b.mapCapacity.Proxy,
 		budget,

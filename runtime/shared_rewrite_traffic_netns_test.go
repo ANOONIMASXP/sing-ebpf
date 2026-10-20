@@ -119,15 +119,13 @@ func TestSharedPacketRewriteCarriesTraffic(t *testing.T) {
 func newSharedRewriteTrafficBackend(t *testing.T) *commonEBPF.SharedPacketRewriteBackend {
 	t.Helper()
 	policy, err := commonEBPF.CompileActionPolicy(commonEBPF.ActionPolicy{
-		EnableTCP: true,
-		EnableUDP: true,
-		Local:     commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept},
-		Shared:    commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept},
+		Local:  commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept},
+		Shared: commonEBPF.ActionScope{Default: commonEBPF.DecisionIntercept},
 	})
 	if err != nil {
 		t.Fatalf("compile policy: %v", err)
 	}
-	backend, err := commonEBPF.PrepareSharedPacketRewrite(nil, commonEBPF.SharedPacketRewriteConfig{
+	backend, err := commonEBPF.PrepareSharedPacketRewrite(commonEBPF.SharedPacketRewriteConfig{
 		ListenerPort: sharedRewriteTrafficListenerPort,
 		EnableTCP:    true,
 		EnableUDP:    true,

@@ -3,6 +3,7 @@
 
 #include "bpf_compat.h"
 #include "shared_network.h"
+#include "force_intercept_policy.h"
 #include "shared_network_packet.h"
 #include "private_address.h"
 
@@ -30,6 +31,8 @@
         .value_size = sizeof(value_type), \
         .max_entries = entries, \
     }
+
+SB_FORCE_MAPS(shared);
 
 EXTERNAL_MAP(shared_control, __u32, struct sb_shared_control, 1U);
 struct bpf_map_def SEC("maps") shared_stats = {
@@ -73,6 +76,8 @@ static __s64 (*csum_diff)(const __be32 *from, __u32 from_size, const __be32 *to,
     (void *)BPF_FUNC_csum_diff;
 static long (*skb_store_bytes)(struct __sk_buff *skb, __u32 offset, const void *from, __u32 length, __u64 flags) =
     (void *)BPF_FUNC_skb_store_bytes;
+static long (*skb_load_bytes)(const struct __sk_buff *skb, __u32 offset, void *to, __u32 length) =
+    (void *)BPF_FUNC_skb_load_bytes;
 static long (*l3_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to, __u64 flags) =
     (void *)BPF_FUNC_l3_csum_replace;
 static long (*l4_csum_replace)(struct __sk_buff *skb, __u32 offset, __u64 from, __u64 to, __u64 flags) =
@@ -133,6 +138,8 @@ INLINE void copy_address(__u8 destination[16], const __u8 source[16]) {
     __builtin_memcpy(__builtin_assume_aligned(destination, 4), __builtin_assume_aligned(source, 4), 16U);
 }
 
+SB_FORCE_LOOKUP(shared)
+
 #include "shared_network_policy.h"
 
 #include "shared_network_flow.h"
@@ -181,16 +188,16 @@ NOINLINE int ingress_ipv4(
     if (sb_ebpf_ipv4_safety_bypass((const __u8 *)&ip->destination)) {
         return shared_ingress_pass();
     }
-    bool force_intercept = shared_force_intercept_ipv4(&scratch->original, control);
-    __u8 dns_policy = force_intercept
+    bool force_intercept = ((control->flags & SB_SHARED_FLAG_FORCE_INTERCEPT_IPV4) != 0U && shared_force_ipv4((const __u8 *)&ip->destination));
+    __u8 port_policy = force_intercept
         ? SB_SHARED_POLICY_PROXY
-        : shared_dns_policy(protocol, source_port, destination_port, control);
-    if (dns_policy == SB_SHARED_POLICY_BYPASS) {
+        : shared_port_policy(protocol, destination_port);
+    if (port_policy == SB_SHARED_POLICY_BYPASS) {
         return shared_ingress_pass();
     }
-    bool respect_source = dns_policy == SB_SHARED_POLICY_RESPECT_SOURCE;
+    bool respect_source = port_policy == SB_SHARED_POLICY_RESPECT_SOURCE;
     bool cached = load_cached_token(scratch);
-    if (!cached && dns_policy != SB_SHARED_POLICY_PROXY) {
+    if (!cached && port_policy != SB_SHARED_POLICY_PROXY) {
         __u32 tcp_sequence = 0U;
         bool initial_syn = initial_tcp_syn(protocol, ports, data_end, &tcp_sequence);
         if (!respect_source && load_cached_bypass(scratch, control, protocol, initial_syn, tcp_sequence)) {
@@ -204,10 +211,6 @@ NOINLINE int ingress_ipv4(
             return shared_ingress_pass();
         }
         if (!respect_source) {
-            if (shared_port_bypassed(protocol, destination_port)) {
-                cache_bypass(scratch, protocol, tcp_sequence);
-                return shared_ingress_pass();
-            }
             __u8 policy = ipv4_policy(
                 (const __u8 *)&ip->destination,
                 protocol,
@@ -405,16 +408,16 @@ NOINLINE int ingress_ipv6(
     if (sb_ebpf_ipv6_safety_bypass(ip->destination)) {
         return shared_ingress_pass();
     }
-    bool force_intercept = shared_force_intercept_ipv6(&scratch->original, control);
-    __u8 dns_policy = force_intercept
+    bool force_intercept = ((control->flags & SB_SHARED_FLAG_FORCE_INTERCEPT_IPV6) != 0U && shared_force_ipv6(ip->destination));
+    __u8 port_policy = force_intercept
         ? SB_SHARED_POLICY_PROXY
-        : shared_dns_policy(protocol, source_port, destination_port, control);
-    if (dns_policy == SB_SHARED_POLICY_BYPASS) {
+        : shared_port_policy(protocol, destination_port);
+    if (port_policy == SB_SHARED_POLICY_BYPASS) {
         return shared_ingress_pass();
     }
-    bool respect_source = dns_policy == SB_SHARED_POLICY_RESPECT_SOURCE;
+    bool respect_source = port_policy == SB_SHARED_POLICY_RESPECT_SOURCE;
     bool cached = load_cached_token(scratch);
-    if (!cached && dns_policy != SB_SHARED_POLICY_PROXY) {
+    if (!cached && port_policy != SB_SHARED_POLICY_PROXY) {
         __u32 tcp_sequence = 0U;
         bool initial_syn = initial_tcp_syn(protocol, ports, data_end, &tcp_sequence);
         if (!respect_source && load_cached_bypass(scratch, control, protocol, initial_syn, tcp_sequence)) {
@@ -425,10 +428,6 @@ NOINLINE int ingress_ipv6(
             return shared_ingress_pass();
         }
         if (!respect_source) {
-            if (shared_port_bypassed(protocol, destination_port)) {
-                cache_bypass(scratch, protocol, tcp_sequence);
-                return shared_ingress_pass();
-            }
             __u8 policy = ipv6_policy(
                 ip->destination,
                 protocol,

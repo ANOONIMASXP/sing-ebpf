@@ -14,7 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func prepareCgroupMaps(runtimeState *cgroupRuntime, capacity CgroupMapCapacity, uidEntries int, localPortEntries int, selfBypassMap *CiliumEBPF.Map) error {
+func prepareCgroupMaps(runtimeState *cgroupRuntime, capacity CgroupMapCapacity, uidEntries int, localPortEntries int, selfBypassMap *CiliumEBPF.Map, force dualStackCIDRPrefixes) error {
 	udpLayout := cgroupUDPMapConfiguration(
 		runtimeState.enable_udp,
 		runtimeState.socket_release_supported,
@@ -53,6 +53,7 @@ func prepareCgroupMaps(runtimeState *cgroupRuntime, capacity CgroupMapCapacity, 
 			name: "sb_cg_rel_watch", mapType: CiliumEBPF.Hash, maxEntries: 1, flags: bpfFlagNoPrealloc,
 		},
 	}
+	addForceMapOverrides(overrides, "cgroup", "sb_cg_force", force)
 	if selfBypassMap != nil {
 		// The temporary object map is replaced by the shared owner below.
 		overrides["cgroup_socket_bypass"] = mapSpecOverride{

@@ -32,6 +32,7 @@ type (
 	SharedPacketRewriteFlowHandle  = core.SharedPacketRewriteFlowHandle
 	SharedPacketRewriteSweepResult = core.SharedPacketRewriteSweepResult
 	TCAssignment                   = core.TCAssignment
+	TCReturnHandle                 = core.TCReturnHandle
 	TCAssignmentSweepResult        = core.TCAssignmentSweepResult
 	TCStats                        = core.TCStats
 	TCLinkFraming                  = core.TCLinkFraming
@@ -52,6 +53,7 @@ type (
 	KernelProbeReport              = core.KernelProbeReport
 	RuntimeProgram                 = core.RuntimeProgram
 	RuntimeState                   = core.RuntimeState
+	RuntimeResources               = core.RuntimeResources
 	MapCategory                    = core.MapCategory
 	MapOccupancy                   = core.MapOccupancy
 	MapOccupancyReport             = core.MapOccupancyReport
@@ -85,7 +87,6 @@ const (
 	MaxConfigurableMapCapacity               = core.MaxConfigurableMapCapacity
 	MapCategoryRuntime                       = core.MapCategoryRuntime
 	MapCategoryConfiguredPolicy              = core.MapCategoryConfiguredPolicy
-	ForceInterceptPrefixesPerFamily          = core.ForceInterceptPrefixesPerFamily
 
 	DefaultTCRoutingMark = core.DefaultTCRoutingMark
 	TCPathShared         = core.TCPathShared
@@ -104,7 +105,6 @@ const (
 	KernelProbeModeLocal  = core.KernelProbeModeLocal
 	KernelProbeModeShared = core.KernelProbeModeShared
 
-	KernelProbeDataPlaneTC            = core.KernelProbeDataPlaneTC
 	KernelProbeDataPlaneCgroup        = core.KernelProbeDataPlaneCgroup
 	KernelProbeDataPlaneSocketAssign  = core.KernelProbeDataPlaneSocketAssign
 	KernelProbeDataPlanePacketRewrite = core.KernelProbeDataPlanePacketRewrite
@@ -240,6 +240,7 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 }
 
 type TCConfig struct {
+	// TCP and UDP preserve their tuples in a required private listener namespace.
 	ListenerPort       uint16
 	EnableLocal        bool
 	EnableShared       bool
@@ -291,15 +292,24 @@ func wrapTCBackend(backend *core.TCBackend) *TCBackend {
 	return &TCBackend{TCBackendHandle: core.NewTCBackendHandle(backend)}
 }
 
-// RegisterTCPListener registers the transparent TCP listener. An MPTCP
-// listener, the Go default since Go 1.24, cannot be placed in a SOCKMAP; it is
-// then found by port and must be bound to the wildcard address.
 func (b *TCBackend) RegisterTCPListener(ipv6 bool, fd int) error {
 	return core.UnwrapTCBackend(b).RegisterTCPListener(ipv6, fd)
 }
 
 func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.AddrPort, interfaceIndex uint32, remove bool) (TCAssignment, error) {
 	return core.UnwrapTCBackend(b).LookupAssignment(protocol, source, destination, interfaceIndex, remove)
+}
+
+func (b *TCBackend) AcquireReturnRoute(protocol uint8, source, destination netip.AddrPort) (TCReturnHandle, error) {
+	return core.UnwrapTCBackend(b).AcquireReturnRoute(protocol, source, destination)
+}
+
+func (b *TCBackend) AcquireReplyRoute(original TCReturnHandle, source netip.AddrPort) (TCReturnHandle, error) {
+	return core.UnwrapTCBackend(b).AcquireReplyRoute(original, source)
+}
+
+func (b *TCBackend) ReleaseReturnRoute(handle TCReturnHandle) {
+	core.UnwrapTCBackend(b).ReleaseReturnRoute(handle)
 }
 
 func (b *TCBackend) RemoveAssignmentIfMatch(protocol uint8, source, destination netip.AddrPort, interfaceIndex uint32, expected TCAssignment) (bool, error) {
@@ -390,8 +400,8 @@ type SharedPacketRewriteBackend struct {
 	core.SharedPacketRewriteBackendHandle
 }
 
-func PrepareSharedPacketRewrite(cgroupBackend *CgroupBackend, config SharedPacketRewriteConfig) (*SharedPacketRewriteBackend, error) {
-	backend, err := core.PrepareSharedPacketRewrite(cgroupBackend, config)
+func PrepareSharedPacketRewrite(config SharedPacketRewriteConfig) (*SharedPacketRewriteBackend, error) {
+	backend, err := core.PrepareSharedPacketRewrite(config)
 	if err != nil {
 		return nil, err
 	}
@@ -569,4 +579,27 @@ func WriteKernelProbeReport(writer io.Writer, report *KernelProbeReport) error {
 
 func WriteKernelProbeReportJSON(writer io.Writer, report *KernelProbeReport) error {
 	return core.WriteKernelProbeReportJSON(writer, report)
+}
+func (b *TCBackend) RuntimeResources() RuntimeResources {
+	if b == nil {
+		return RuntimeResources{}
+	}
+	return core.UnwrapTCBackend(b).RuntimeResources()
+}
+func (b *SharedPacketRewriteBackend) RuntimeResources() RuntimeResources {
+	if b == nil {
+		return RuntimeResources{}
+	}
+	return core.UnwrapSharedPacketRewriteBackend(b).RuntimeResources()
+}
+func (b *SelfBypass) RuntimeResources() RuntimeResources {
+	if b == nil {
+		return RuntimeResources{}
+	}
+	return core.UnwrapSelfBypass(b).RuntimeResources()
+}
+
+// InspectRuntimeResources inspects only the IDs supplied by resource owners.
+func InspectRuntimeResources(owners ...RuntimeResources) RuntimeState {
+	return core.InspectRuntimeResources(owners...)
 }

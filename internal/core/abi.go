@@ -14,14 +14,6 @@ const (
 	addressFamilyIPv6 = 10
 )
 
-type DNSMode uint16
-
-const (
-	DNSModeHijack DNSMode = iota
-	DNSModeRespectPolicy
-	DNSModeOff
-)
-
 type UIDRange struct {
 	Start uint32
 	End   uint32

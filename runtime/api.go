@@ -56,8 +56,9 @@ type TCRuntime interface {
 
 // TCRuntimeConfig contains only mechanism-level startup state.
 type TCRuntimeConfig struct {
+	// Namespace remains caller-owned and must outlive the runtime and listeners.
+	Namespace             *TCNamespace
 	Backend               *core.TCBackend
-	LocalEnabled          bool
 	IPv6Enabled           bool
 	LocalInterface        string
 	SharedInterfaces      []string
@@ -78,13 +79,13 @@ func NewTCRuntime(config TCRuntimeConfig) (TCRuntime, error) {
 	}
 	return startTCDataPlane(
 		config.Backend,
-		config.LocalEnabled,
 		config.IPv6Enabled,
 		config.LocalInterface,
 		config.SharedInterfaces,
 		config.HostAddresses,
 		config.SharedSourceMACPolicy,
 		config.Priority,
+		config.Namespace,
 	)
 }
 
@@ -111,6 +112,9 @@ func (d *tcDataPlane) NetworkInfo() core.TCNetworkInfo {
 	d.access.Lock()
 	defer d.access.Unlock()
 	var info core.TCNetworkInfo
+	if d.namespace != nil {
+		info.Namespace = d.namespace.Path()
+	}
 	if d.delivery != nil {
 		info.DeliveryInterface = d.delivery.deliveryName
 		if d.delivery.delivery != nil && d.delivery.delivery.Attrs() != nil {
@@ -136,6 +140,9 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
 	d.access.Lock()
 	defer d.access.Unlock()
 	info := core.TCNetworkInfo{}
+	if d.namespace != nil {
+		info.Namespace = d.namespace.Path()
+	}
 	if d.delivery != nil {
 		info.DeliveryInterface = d.delivery.deliveryName
 		if d.delivery.delivery != nil && d.delivery.delivery.Attrs() != nil {

@@ -99,7 +99,6 @@ func TestICMPEchoReplyAnswersOnlyEchoReplyPrefixIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify icmp_echo_reply answers only the echo-reply prefix")
 	requireTCSocketAssignment(t)
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
 		Local: ActionScope{Default: DecisionIntercept, DestinationCIDR: []CIDRDecision{
 			{Prefix: netip.MustParsePrefix("100.64.0.0/10"), Action: DecisionIntercept},
 			{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept, EchoReply: true},

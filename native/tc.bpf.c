@@ -11,7 +11,6 @@
 #define BPF_ANY 0U
 #define BPF_F_CURRENT_NETNS (-1ULL)
 #define BPF_F_INGRESS (1ULL << 0)
-#define BPF_TCP_ESTABLISHED 1U
 #define BPF_TCP_LISTEN 10U
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
@@ -43,8 +42,7 @@
 #define SB_TC_FLAG_UDP (1U << 3)
 #define SB_TC_FLAG_UID_POLICY (1U << 4)
 #define SB_TC_FLAG_UID_DEFAULT_BYPASS (1U << 5)
-#define SB_TC_FLAG_LOCAL_BYPASS_PRIVATE (1U << 6)
-#define SB_TC_FLAG_SHARED_BYPASS_PRIVATE (1U << 7)
+#define SB_TC_FLAG_SHARED_DEFAULT_BYPASS (1U << 7)
 #define SB_TC_FLAG_BYPASS_IPV4 (1U << 8)
 #define SB_TC_FLAG_BYPASS_IPV6 (1U << 9)
 #define SB_TC_FLAG_LOCAL_BYPASS_IPV4 SB_TC_FLAG_BYPASS_IPV4
@@ -62,15 +60,10 @@
 #define SB_TC_FLAG_SHARED_BYPASS_PORT (1U << 21)
 #define SB_TC_FLAG_SHARED_BYPASS_IPV4 (1U << 22)
 #define SB_TC_FLAG_SHARED_BYPASS_IPV6 (1U << 23)
-#define SB_TC_FLAG_FORCE_INTERCEPT_SLOT1_IPV4 (1U << 24)
-#define SB_TC_FLAG_FORCE_INTERCEPT_SLOT1_IPV6 (1U << 25)
 
 #define SB_TC_SOCKET_POLICY_BYPASS 1U
 #define SB_TC_SOCKET_POLICY_INTERCEPT 2U
 
-#define SB_TC_DNS_HIJACK 0U
-#define SB_TC_DNS_RESPECT_POLICY 1U
-#define SB_TC_DNS_OFF 2U
 
 #define SB_TC_LISTENER_TCP4 0U
 #define SB_TC_LISTENER_TCP6 1U
@@ -85,7 +78,10 @@
 #define SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE 2U
 #define SB_TC_STAT_LOCAL_FRAGMENT_PASS 3U
 #define SB_TC_STAT_SHARED_FRAGMENT_PASS 4U
-#define SB_TC_STAT_COUNT 5U
+#define SB_TC_STAT_RETURN_UPDATE_FAILURE 5U
+#define SB_TC_STAT_RETURN_CONFLICT 6U
+#define SB_TC_STAT_RETURN_LOOKUP_FAILURE 7U
+#define SB_TC_STAT_COUNT 8U
 
 struct sb_tc_control {
     __u32 enabled;
@@ -93,11 +89,9 @@ struct sb_tc_control {
     __u32 delivery_ifindex;
     __u32 routing_mark;
     __u16 listener_port;
-    __u16 local_dns_mode;
-    __u16 shared_dns_mode;
+    __u16 reserved_policy[2];
     __u8 delivery_mac[6];
     __u16 reserved;
-    struct sb_ebpf_force_intercept_slot force_intercept[SB_EBPF_FORCE_INTERCEPT_SLOTS];
 };
 
 struct sb_tc_uid_key {
@@ -155,15 +149,13 @@ struct sb_tc_assign_value {
     __u32 generation;
 };
 
-_Static_assert(sizeof(struct sb_tc_control) == 112, "sb_tc_control ABI size");
+_Static_assert(sizeof(struct sb_tc_control) == 32, "sb_tc_control ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, delivery_ifindex) == 8,
     "sb_tc_control delivery_ifindex ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, routing_mark) == 12,
     "sb_tc_control routing_mark ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, listener_port) == 16,
     "sb_tc_control listener_port ABI offset");
-_Static_assert(__builtin_offsetof(struct sb_tc_control, force_intercept) == 30,
-    "sb_tc_control force_intercept ABI offset");
 _Static_assert(sizeof(struct sb_tc_assign_key) == 44, "sb_tc_assign_key ABI size");
 _Static_assert(sizeof(struct sb_tc_assign_value) == 32, "sb_tc_assign_value ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, socket_cookie) == 0,
@@ -253,6 +245,9 @@ MAP(tc_include_source_mac, struct sb_tc_mac_key, __u8, BPF_MAP_TYPE_HASH, 1024U)
 MAP(tc_exclude_source_mac, struct sb_tc_mac_key, __u8, BPF_MAP_TYPE_HASH, 1024U);
 MAP(tc_host_ipv4, struct sb_tc_ipv4_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 MAP(tc_host_ipv6, struct sb_tc_ipv6_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
+SB_FORCE_MAPS(tc_local);
+SB_FORCE_MAPS(tc_shared);
+
 MAP(tc_local_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 MAP(tc_shared_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 
@@ -277,10 +272,10 @@ static struct bpf_sock *(*skc_lookup_tcp)(void *ctx, struct bpf_sock_tuple *tupl
     __u32 tuple_size, __u64 netns, __u64 flags) = (void *)BPF_FUNC_skc_lookup_tcp;
 static struct bpf_sock *(*sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple,
     __u32 tuple_size, __u64 netns, __u64 flags) = (void *)BPF_FUNC_sk_lookup_udp;
+static long (*skb_pull_data)(void *ctx, __u32 length) = (void *)BPF_FUNC_skb_pull_data;
 static long (*sk_assign)(void *ctx, struct bpf_sock *socket, __u64 flags) =
     (void *)BPF_FUNC_sk_assign;
 static void (*sk_release)(struct bpf_sock *socket) = (void *)BPF_FUNC_sk_release;
-static long (*skb_pull_data)(void *ctx, __u32 length) = (void *)BPF_FUNC_skb_pull_data;
 
 INLINE void increment_stat(__u32 index) {
     if (index >= SB_TC_STAT_COUNT) return;
@@ -328,6 +323,9 @@ INLINE bool service_port(__u8 protocol, __u16 source, __u16 destination) {
         destination == 67U || destination == 68U || destination == 546U || destination == 547U;
 }
 
+SB_FORCE_LOOKUP(tc_local)
+SB_FORCE_LOOKUP(tc_shared)
+
 INLINE bool uid_bypassed(struct __sk_buff *skb, const struct sb_tc_control *control) {
     if ((control->flags & SB_TC_FLAG_UID_POLICY) == 0U) return false;
     __u32 uid = network_order32(get_socket_uid(skb));
@@ -343,46 +341,23 @@ INLINE __u32 socket_metadata(__u64 socket_cookie) {
     return metadata != 0 ? *metadata : 0U;
 }
 
-INLINE bool port_bypassed(const struct sb_tc_control *control,
+INLINE __u8 port_action(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *flow, bool shared) {
     __u32 flag = shared ? SB_TC_FLAG_SHARED_BYPASS_PORT : SB_TC_FLAG_LOCAL_BYPASS_PORT;
     if ((control->flags & flag) == 0U) return false;
     struct sb_tc_port_key key = {.protocol = flow->protocol, .port = flow->destination_port};
-    if (shared) return map_lookup(&tc_shared_bypass_port, &key) != 0;
-    return map_lookup(&tc_local_bypass_port, &key) != 0;
-}
-
-INLINE bool dns_selected(__u8 protocol, __u16 destination_port, __u16 mode) {
-    if ((protocol != IPPROTO_TCP_VALUE && protocol != IPPROTO_UDP_VALUE) || destination_port != 53U) return false;
-    return mode == SB_TC_DNS_HIJACK;
-}
-
-INLINE bool dns_bypassed(__u8 protocol, __u16 destination_port, __u16 mode) {
-    return (protocol == IPPROTO_TCP_VALUE || protocol == IPPROTO_UDP_VALUE) &&
-        destination_port == 53U && mode == SB_TC_DNS_OFF;
-}
-
-INLINE bool private_destination(const struct sb_tc_assign_key *key) {
-    if (key->family == AF_INET_VALUE) return sb_ebpf_ipv4_private_address(key->destination_addr);
-    return sb_ebpf_ipv6_private_address(key->destination_addr);
+    __u8 *action = shared ? map_lookup(&tc_shared_bypass_port, &key) : map_lookup(&tc_local_bypass_port, &key);
+    return action != 0 ? *action : 0U;
 }
 
 INLINE bool force_intercept_destination(const struct sb_tc_control *control,
-    const struct sb_tc_assign_key *key) {
+    const struct sb_tc_assign_key *key, bool shared) {
     if (key->family == AF_INET_VALUE) {
-        return sb_ebpf_force_intercept_slots_ipv4(
-            key->destination_addr,
-            control->flags,
-            SB_TC_FLAG_FORCE_INTERCEPT_IPV4,
-            SB_TC_FLAG_FORCE_INTERCEPT_SLOT1_IPV4,
-            control->force_intercept);
+        if ((control->flags & SB_TC_FLAG_FORCE_INTERCEPT_IPV4) == 0U) return false;
+        return shared ? tc_shared_force_ipv4(key->destination_addr) : tc_local_force_ipv4(key->destination_addr);
     }
-    return sb_ebpf_force_intercept_slots_ipv6(
-        key->destination_addr,
-        control->flags,
-        SB_TC_FLAG_FORCE_INTERCEPT_IPV6,
-        SB_TC_FLAG_FORCE_INTERCEPT_SLOT1_IPV6,
-        control->force_intercept);
+    if ((control->flags & SB_TC_FLAG_FORCE_INTERCEPT_IPV6) == 0U) return false;
+    return shared ? tc_shared_force_ipv6(key->destination_addr) : tc_local_force_ipv6(key->destination_addr);
 }
 
 INLINE bool bypass_destination(const struct sb_tc_control *control,
@@ -463,39 +438,31 @@ INLINE bool source_mac_included(const struct sb_tc_control *control, const __u8 
 INLINE bool shared_source_selected(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *flow, const __u8 source_mac[6]) {
     if (source_address_excluded(control, flow) || source_mac_excluded(control, source_mac)) return false;
-    if ((control->flags & (SB_TC_FLAG_INCLUDE_SOURCE | SB_TC_FLAG_INCLUDE_SOURCE_MAC)) == 0U) return true;
+    if ((control->flags & SB_TC_FLAG_SHARED_DEFAULT_BYPASS) == 0U) return true;
     return source_address_included(control, flow) || source_mac_included(control, source_mac);
 }
 
-// The bypass checks after the owner/source check all yield "pass", so their
-// order is free. The map-free private-address test runs before the UID,
-// source, port, host and CIDR map lookups; respect_policy DNS is exempt from
-// destination bypasses and therefore skips it.
 INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, __u32 socket_metadata_value) {
-    if (force_intercept_destination(control, key)) return true;
-    if (dns_bypassed(key->protocol, key->destination_port, control->local_dns_mode)) return false;
-    if (dns_selected(key->protocol, key->destination_port, control->local_dns_mode)) return true;
+    if (force_intercept_destination(control, key, false)) return true;
+    __u8 action = port_action(control, key, false);
+    if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return false;
+    if (action == SB_PORT_INTERCEPT) return true;
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_POLICY_BYPASS) != 0U) return false;
-    bool respect_dns = key->destination_port == 53U && control->local_dns_mode == SB_TC_DNS_RESPECT_POLICY;
-    if (!respect_dns && (control->flags & SB_TC_FLAG_LOCAL_BYPASS_PRIVATE) != 0U && private_destination(key)) return false;
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_POLICY_INTERCEPT) == 0U && uid_bypassed(skb, control)) return false;
-    if (respect_dns) return true;
-    if (port_bypassed(control, key, false)) return false;
+    if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_INTERCEPT) return true;
     if (host_destination(control, key)) return false;
     return !bypass_destination(control, key, false);
 }
 
 INLINE bool shared_selected(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, const __u8 source_mac[6]) {
-    if (force_intercept_destination(control, key)) return true;
-    if (dns_bypassed(key->protocol, key->destination_port, control->shared_dns_mode)) return false;
-    if (dns_selected(key->protocol, key->destination_port, control->shared_dns_mode)) return true;
-    bool respect_dns = key->destination_port == 53U && control->shared_dns_mode == SB_TC_DNS_RESPECT_POLICY;
-    if (!respect_dns && (control->flags & SB_TC_FLAG_SHARED_BYPASS_PRIVATE) != 0U && private_destination(key)) return false;
+    if (force_intercept_destination(control, key, true)) return true;
+    __u8 action = port_action(control, key, true);
+    if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return false;
+    if (action == SB_PORT_INTERCEPT) return true;
     if (!shared_source_selected(control, key, source_mac)) return false;
-    if (respect_dns) return true;
-    if (port_bypassed(control, key, true)) return false;
+    if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_INTERCEPT) return true;
     if (host_destination(control, key)) return false;
     return !bypass_destination(control, key, true);
 }
@@ -521,6 +488,10 @@ INLINE bool parse_ethernet(void *data, void *data_end, __u16 *protocol, __u32 *l
 #define SB_TC_PARSE_FLOW 1
 #define SB_TC_PARSE_FRAGMENT 2
 
+// Fragment parsing is enabled only for replies generated in our private netns.
+// External fragments continue to follow the existing pass-through policy.
+struct sb_tc_fragment { __u32 id; __u32 state; }; // 0=whole, 1=first, 2=tail
+
 // tcp_flags returns the TCP flag byte. A header that cannot be read is
 // reported as a SYN so that callers which act only on connection setup stay
 // conservative.
@@ -531,24 +502,33 @@ INLINE __u8 tcp_flags(void *transport, void *data_end, __u8 protocol) {
     return *flags;
 }
 
+// The key fillers report a fragment they do not parse separately, so that
+// each caller decides whether and where to count it. flags, when given,
+// receives the TCP flag byte of a parsed flow.
 INLINE int fill_ipv4_key(void *data, void *data_end, __u32 l3_offset,
-    const struct sb_tc_control *control, struct sb_tc_assign_key *key, __u8 *flags) {
+    const struct sb_tc_control *control, struct sb_tc_assign_key *key,
+    struct sb_tc_fragment *fragment, __u8 *flags) {
     struct ipv4_header *ip = data + l3_offset;
     if ((void *)(ip + 1) > data_end || ip->version != 4U || ip->ihl < 5U ||
         !protocol_enabled(control, ip->protocol)) return SB_TC_PARSE_PASS;
     if ((network_order16(ip->fragment_offset) & (IPV4_FRAGMENT_OFFSET_MASK | IPV4_FRAGMENT_MORE)) != 0U) {
-        return SB_TC_PARSE_FRAGMENT;
+        if (fragment == 0) return SB_TC_PARSE_FRAGMENT;
+        fragment->id = network_order16(ip->id);
+        fragment->state = (network_order16(ip->fragment_offset) & IPV4_FRAGMENT_OFFSET_MASK) != 0U ? 2U : 1U;
     }
     __u32 header_length = (__u32)ip->ihl * 4U;
     struct transport_ports *ports = (void *)ip + header_length;
-    if ((void *)(ports + 1) > data_end) return SB_TC_PARSE_PASS;
-    __u16 source_port = network_order16(ports->source);
-    __u16 destination_port = network_order16(ports->destination);
+    __u16 source_port = 0U, destination_port = 0U;
+    if (fragment == 0 || fragment->state != 2U) {
+        if ((void *)(ports + 1) > data_end) return SB_TC_PARSE_PASS;
+        source_port = network_order16(ports->source);
+        destination_port = network_order16(ports->destination);
+    }
     if (service_port(ip->protocol, source_port, destination_port)) return SB_TC_PARSE_PASS;
     __u8 destination[4];
     __builtin_memcpy(destination, &ip->destination, 4U);
     if (sb_ebpf_ipv4_safety_bypass(destination)) return SB_TC_PARSE_PASS;
-    *flags = tcp_flags(ports, data_end, ip->protocol);
+    if (flags != 0) *flags = tcp_flags(ports, data_end, ip->protocol);
     __builtin_memset(key, 0, sizeof(*key));
     key->family = AF_INET_VALUE;
     key->protocol = ip->protocol;
@@ -560,7 +540,8 @@ INLINE int fill_ipv4_key(void *data, void *data_end, __u32 l3_offset,
 }
 
 INLINE int fill_ipv6_key(void *data, void *data_end, __u32 l3_offset,
-    const struct sb_tc_control *control, struct sb_tc_assign_key *key, __u8 *flags) {
+    const struct sb_tc_control *control, struct sb_tc_assign_key *key,
+    struct sb_tc_fragment *fragment_info, __u8 *flags) {
     struct ipv6_header *ip = data + l3_offset;
     if ((void *)(ip + 1) > data_end || (network_order32(ip->version_flow) >> 28U) != 6U) return SB_TC_PARSE_PASS;
     __u8 protocol = ip->next_header;
@@ -572,7 +553,10 @@ INLINE int fill_ipv6_key(void *data, void *data_end, __u32 l3_offset,
             if ((void *)(fragment + 1) > data_end) return SB_TC_PARSE_PASS;
             if ((network_order16(fragment->offset_flags) &
                     (IPV6_FRAGMENT_OFFSET_MASK | IPV6_FRAGMENT_MORE)) != 0U) {
-                return SB_TC_PARSE_FRAGMENT;
+                if (fragment_info == 0 || !protocol_enabled(control, fragment->next_header))
+                    return SB_TC_PARSE_FRAGMENT;
+                fragment_info->id = network_order32(fragment->identification);
+                fragment_info->state = (network_order16(fragment->offset_flags) & IPV6_FRAGMENT_OFFSET_MASK) != 0U ? 2U : 1U;
             }
             protocol = fragment->next_header;
             transport_offset += sizeof(*fragment);
@@ -591,12 +575,15 @@ INLINE int fill_ipv6_key(void *data, void *data_end, __u32 l3_offset,
     }
     if (!protocol_enabled(control, protocol)) return SB_TC_PARSE_PASS;
     struct transport_ports *ports = data + transport_offset;
-    if ((void *)(ports + 1) > data_end) return SB_TC_PARSE_PASS;
-    __u16 source_port = network_order16(ports->source);
-    __u16 destination_port = network_order16(ports->destination);
+    __u16 source_port = 0U, destination_port = 0U;
+    if (fragment_info == 0 || fragment_info->state != 2U) {
+        if ((void *)(ports + 1) > data_end) return SB_TC_PARSE_PASS;
+        source_port = network_order16(ports->source);
+        destination_port = network_order16(ports->destination);
+    }
     if (service_port(protocol, source_port, destination_port) ||
         sb_ebpf_ipv6_safety_bypass(ip->destination)) return SB_TC_PARSE_PASS;
-    *flags = tcp_flags(ports, data_end, protocol);
+    if (flags != 0) *flags = tcp_flags(ports, data_end, protocol);
     __builtin_memset(key, 0, sizeof(*key));
     key->family = AF_INET6_VALUE;
     key->protocol = protocol;
@@ -637,7 +624,8 @@ INLINE void pull_headers(struct __sk_buff *skb, __u32 length) {
 // parse_flow fills key for a TCP/UDP flow the data planes may select. A
 // fragment is reported separately so that each caller decides whether and
 // where to count it. Ingress callers pull headers a driver left in page
-// fragments; locally built egress packets always have them linear.
+// fragments; locally built egress packets always have them linear, and the
+// isolated delivery receives packets a selecting program already pulled.
 INLINE int parse_flow(struct __sk_buff *skb, const struct sb_tc_control *control,
     __u32 ipv6_flag, bool ethernet, bool pull, struct sb_tc_assign_key *key, __u8 source_mac[6], __u8 *flags) {
     void *data;
@@ -660,10 +648,10 @@ INLINE int parse_flow(struct __sk_buff *skb, const struct sb_tc_control *control
         __builtin_memset(source_mac, 0, 6U);
     }
     if (ether_type == ETH_P_IP_VALUE && (control->flags & SB_TC_FLAG_IPV4) != 0U) {
-        return fill_ipv4_key(data, data_end, l3_offset, control, key, flags);
+        return fill_ipv4_key(data, data_end, l3_offset, control, key, 0, flags);
     }
     if (ether_type == ETH_P_IPV6_VALUE && (control->flags & ipv6_flag) != 0U) {
-        return fill_ipv6_key(data, data_end, l3_offset, control, key, flags);
+        return fill_ipv6_key(data, data_end, l3_offset, control, key, 0, flags);
     }
     return SB_TC_PARSE_PASS;
 }
@@ -673,12 +661,8 @@ INLINE int parse_pass(int parsed, __u32 fragment_stat) {
     return TC_ACT_UNSPEC;
 }
 
-// The TCP lookups report whether they found an established socket. The
-// verifier rewrites a bpf_sock field load per pointer type, so state can only
-// be read here, where the skc_lookup_tcp result is not mixed with a SOCKMAP
-// listener.
 NOINLINE struct bpf_sock *lookup_tcp_socket(struct __sk_buff *skb,
-    const struct sb_tc_control *control, const struct sb_tc_assign_key *key, bool *established) {
+    const struct sb_tc_assign_key *key) {
     struct bpf_sock_tuple tuple = {};
     __u32 tuple_size;
     if (key->family == AF_INET_VALUE) {
@@ -695,27 +679,14 @@ NOINLINE struct bpf_sock *lookup_tcp_socket(struct __sk_buff *skb,
         tuple_size = sizeof(tuple.ipv6);
     }
     struct bpf_sock *socket = skc_lookup_tcp(skb, &tuple, tuple_size, BPF_F_CURRENT_NETNS, 0U);
-    if (socket != 0 && socket->state != BPF_TCP_LISTEN) {
-        *established = socket->state == BPF_TCP_ESTABLISHED;
-        return socket;
-    }
+    if (socket != 0 && socket->state != BPF_TCP_LISTEN) return socket;
     if (socket != 0) sk_release(socket);
     __u32 listener = key->family == AF_INET_VALUE ? SB_TC_LISTENER_TCP4 : SB_TC_LISTENER_TCP6;
-    struct bpf_sock *registered = map_lookup(&tc_listener_sockets, &listener);
-    if (registered != 0) return registered;
-    // A SOCKMAP holds only plain TCP sockets, so an MPTCP listener is not
-    // registered. Find its TCP subflow listener by port, as the legacy lookup
-    // does; this requires a wildcard bind.
-    if (key->family == AF_INET_VALUE) {
-        tuple.ipv4.dport = network_order16(control->listener_port);
-    } else {
-        tuple.ipv6.dport = network_order16(control->listener_port);
-    }
-    return skc_lookup_tcp(skb, &tuple, tuple_size, BPF_F_CURRENT_NETNS, 0U);
+    return map_lookup(&tc_listener_sockets, &listener);
 }
 
 NOINLINE struct bpf_sock *lookup_tcp_socket_legacy(struct __sk_buff *skb,
-    const struct sb_tc_control *control, const struct sb_tc_assign_key *key, bool *established) {
+    const struct sb_tc_control *control, const struct sb_tc_assign_key *key) {
     struct bpf_sock_tuple tuple = {};
     __u32 tuple_size;
     if (key->family == AF_INET_VALUE) {
@@ -732,10 +703,7 @@ NOINLINE struct bpf_sock *lookup_tcp_socket_legacy(struct __sk_buff *skb,
         tuple_size = sizeof(tuple.ipv6);
     }
     struct bpf_sock *socket = skc_lookup_tcp(skb, &tuple, tuple_size, BPF_F_CURRENT_NETNS, 0U);
-    if (socket != 0 && socket->state != BPF_TCP_LISTEN) {
-        *established = socket->state == BPF_TCP_ESTABLISHED;
-        return socket;
-    }
+    if (socket != 0 && socket->state != BPF_TCP_LISTEN) return socket;
     if (socket != 0) sk_release(socket);
 
     // The legacy path has no SOCKMAP. Query the actual transparent listener
@@ -779,177 +747,7 @@ INLINE bool source_mac_equal(const __u8 left[6], const __u8 right[6]) {
     return left_low == right_low && left_high == right_high;
 }
 
-// Userspace reads a TCP assignment when it accepts the connection and then
-// removes it, and the entry is written while the connection is being set up.
-// Packets of an established socket only need sk_assign: refreshing the entry
-// would cost an LRU lookup per packet and recreate the consumed entry.
-INLINE int assign_established(struct __sk_buff *skb, struct bpf_sock *socket) {
-    long result = sk_assign(skb, socket, 0U);
-    sk_release(socket);
-    if (result != 0) {
-        increment_stat(SB_TC_STAT_SK_ASSIGN_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    return TC_ACT_OK;
-}
-
-NOINLINE int assign_socket(struct __sk_buff *skb, const struct sb_tc_control *control,
-    const struct sb_tc_assign_key *key, const __u8 source_mac[6], __u8 path) {
-    bool source_mac_valid = (path & SB_TC_PATH_SOURCE_MAC_VALID) != 0U;
-    path &= ~SB_TC_PATH_SOURCE_MAC_VALID;
-    bool established = false;
-    struct bpf_sock *socket = key->protocol == IPPROTO_TCP_VALUE
-        ? lookup_tcp_socket(skb, control, key, &established)
-        : lookup_udp_socket(skb, control, key);
-    if (socket == 0) {
-        increment_stat(SB_TC_STAT_SOCKET_LOOKUP_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    if (established) return assign_established(skb, socket);
-    struct sb_tc_assign_key assignment_key = *key;
-    if (key->protocol == IPPROTO_UDP_VALUE && path == SB_TC_PATH_SHARED)
-        assignment_key.interface_index = skb->ifindex;
-    struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
-    __u64 now_ns = ktime_get_ns();
-    struct sb_tc_assign_value value = {
-        .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
-        .last_seen_ns = now_ns,
-        .ifindex = skb->ifindex,
-        .path = path,
-        .source_mac_valid = source_mac_valid,
-        .generation = next_assignment_generation(existing),
-    };
-    __builtin_memcpy(value.source_mac, source_mac, 6U);
-    bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
-        existing->ifindex != value.ifindex ||
-        existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
-    if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
-    long result = sk_assign(skb, socket, 0U);
-    sk_release(socket);
-    if (result != 0) {
-        increment_stat(SB_TC_STAT_SK_ASSIGN_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
-        increment_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    if (!assignment_changed && existing != 0) existing->last_seen_ns = now_ns;
-    return TC_ACT_OK;
-}
-
-NOINLINE int assign_socket_legacy(struct __sk_buff *skb, const struct sb_tc_control *control,
-    const struct sb_tc_assign_key *key, const __u8 source_mac[6], __u8 path) {
-    bool source_mac_valid = (path & SB_TC_PATH_SOURCE_MAC_VALID) != 0U;
-    path &= ~SB_TC_PATH_SOURCE_MAC_VALID;
-    bool established = false;
-    struct bpf_sock *socket = key->protocol == IPPROTO_TCP_VALUE
-        ? lookup_tcp_socket_legacy(skb, control, key, &established)
-        : lookup_udp_socket(skb, control, key);
-    if (socket == 0) {
-        increment_stat(SB_TC_STAT_SOCKET_LOOKUP_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    if (established) return assign_established(skb, socket);
-    struct sb_tc_assign_key assignment_key = *key;
-    if (key->protocol == IPPROTO_UDP_VALUE && path == SB_TC_PATH_SHARED)
-        assignment_key.interface_index = skb->ifindex;
-    struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
-    __u64 now_ns = ktime_get_ns();
-    struct sb_tc_assign_value value = {
-        .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
-        .last_seen_ns = now_ns,
-        .ifindex = skb->ifindex,
-        .path = path,
-        .source_mac_valid = source_mac_valid,
-        .generation = next_assignment_generation(existing),
-    };
-    __builtin_memcpy(value.source_mac, source_mac, 6U);
-    bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
-        existing->ifindex != value.ifindex ||
-        existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
-    if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
-    long result = sk_assign(skb, socket, 0U);
-    sk_release(socket);
-    if (result != 0) {
-        increment_stat(SB_TC_STAT_SK_ASSIGN_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
-        increment_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    if (!assignment_changed && existing != 0) existing->last_seen_ns = now_ns;
-    return TC_ACT_OK;
-}
-
-NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control *control,
-    const struct sb_tc_assign_key *key, const __u8 source_mac[6], __u8 path) {
-    bool source_mac_valid = (path & SB_TC_PATH_SOURCE_MAC_VALID) != 0U;
-    path &= ~SB_TC_PATH_SOURCE_MAC_VALID;
-    struct bpf_sock *socket = lookup_udp_socket(skb, control, key);
-    if (socket == 0) {
-        increment_stat(SB_TC_STAT_SOCKET_LOOKUP_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    struct sb_tc_assign_key assignment_key = *key;
-    assignment_key.interface_index = path == SB_TC_PATH_SHARED ? skb->ifindex : 0U;
-    struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
-    __u64 now_ns = ktime_get_ns();
-    struct sb_tc_assign_value value = {
-        .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
-        .last_seen_ns = now_ns,
-        .ifindex = skb->ifindex,
-        .path = path,
-        .source_mac_valid = source_mac_valid,
-        .generation = next_assignment_generation(existing),
-    };
-    __builtin_memcpy(value.source_mac, source_mac, 6U);
-    bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
-        existing->ifindex != value.ifindex || existing->path != value.path ||
-        existing->source_mac_valid != value.source_mac_valid;
-    if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
-    long result = sk_assign(skb, socket, 0U);
-    sk_release(socket);
-    if (result != 0) {
-        increment_stat(SB_TC_STAT_SK_ASSIGN_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
-        increment_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
-        return TC_ACT_SHOT;
-    }
-    if (!assignment_changed && existing != 0) existing->last_seen_ns = now_ns;
-    return TC_ACT_OK;
-}
-
-INLINE void record_local_socket_cookie(const struct sb_tc_assign_key *key, __u64 socket_cookie) {
-    if (socket_cookie == 0U) return;
-    struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, key);
-    if (existing != 0 && existing->socket_cookie == socket_cookie) {
-        existing->last_seen_ns = ktime_get_ns();
-        return;
-    }
-    struct sb_tc_assign_value value = {
-        .socket_cookie = socket_cookie,
-        .last_seen_ns = ktime_get_ns(),
-        .generation = next_assignment_generation(existing),
-    };
-    map_update(&tc_assignment, key, &value, BPF_ANY);
-}
-
-INLINE int redirect_local(struct __sk_buff *skb, const struct sb_tc_control *control, bool ethernet) {
-    if (ethernet) {
-        if (skb_store_bytes(skb, 0U, control->delivery_mac, 6U, 0U) != 0) return TC_ACT_UNSPEC;
-    } else {
-        __be16 protocol = skb->protocol;
-        if (skb_change_head(skb, sizeof(struct ethernet_header), 0U) != 0) return TC_ACT_UNSPEC;
-        struct ethernet_header header = {.protocol = protocol};
-        __builtin_memcpy(header.destination, control->delivery_mac, 6U);
-        if (skb_store_bytes(skb, 0U, &header, sizeof(header), 0U) != 0) return TC_ACT_SHOT;
-    }
-    return redirect((int)control->delivery_ifindex, 0U);
-}
+#include "tc_isolation.h"
 
 INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_process) {
     const struct sb_tc_control *control = load_control();
@@ -969,157 +767,36 @@ INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_pr
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_SELF_BYPASS) != 0U) return TC_ACT_UNSPEC;
     if (parsed != SB_TC_PARSE_FLOW) return parse_pass(parsed, SB_TC_STAT_LOCAL_FRAGMENT_PASS);
     if (!local_selected(skb, control, &key, socket_metadata_value)) return TC_ACT_UNSPEC;
-    // Userspace takes a TCP connection's cookie once, when it accepts the
-    // connection, so only its setup packets need to record it.
-    if (track_process && (key.protocol != IPPROTO_TCP_VALUE || (flags & TCP_FLAG_SYN) != 0U))
-        record_local_socket_cookie(&key, socket_cookie);
-    return redirect_local(skb, control, ethernet);
+    return redirect_isolated(skb, control, &key, track_process ? socket_cookie : 0U,
+        SB_TC_PATH_DELIVERY | (ethernet ? SB_TC_RETURN_ETHERNET : 0U) | assignment_record(&key, flags));
 }
 
-SEC("classifier/local_egress_ethernet_mark")
-int sing_ebpf_tc_local_egress_ethernet_mark(struct __sk_buff *skb) {
-	return local_egress_mark(skb, true, false);
-}
+SEC("classifier/local_egress_ethernet_isolated")
+int sing_ebpf_tc_local_ethernet_isolated(struct __sk_buff *skb) { return local_egress_mark(skb, true, false); }
+SEC("classifier/local_egress_raw_ip_isolated")
+int sing_ebpf_tc_local_raw_isolated(struct __sk_buff *skb) { return local_egress_mark(skb, false, false); }
+SEC("classifier/local_egress_ethernet_isolated_process")
+int sing_ebpf_tc_local_ethernet_isolated_process(struct __sk_buff *skb) { return local_egress_mark(skb, true, true); }
+SEC("classifier/local_egress_raw_ip_isolated_process")
+int sing_ebpf_tc_local_raw_isolated_process(struct __sk_buff *skb) { return local_egress_mark(skb, false, true); }
 
-SEC("classifier/local_egress_raw_ip_mark")
-int sing_ebpf_tc_local_egress_raw_ip_mark(struct __sk_buff *skb) {
-	return local_egress_mark(skb, false, false);
-}
-
-SEC("classifier/local_egress_ethernet_process")
-int sing_ebpf_tc_local_egress_ethernet_process(struct __sk_buff *skb) {
-	return local_egress_mark(skb, true, true);
-}
-
-SEC("classifier/local_egress_raw_ip_process")
-int sing_ebpf_tc_local_egress_raw_ip_process(struct __sk_buff *skb) {
-	return local_egress_mark(skb, false, true);
-}
-
-INLINE int shared_ingress(struct __sk_buff *skb, bool ethernet) {
+INLINE int shared_isolated(struct __sk_buff *skb, bool ethernet) {
     const struct sb_tc_control *control = load_control();
-    if (control == 0 || control->enabled == 0U) return TC_ACT_UNSPEC;
+    if (control == 0 || control->enabled == 0U || control->delivery_ifindex == 0U) return TC_ACT_UNSPEC;
     struct sb_tc_assign_key key;
     __u8 source_mac[6];
-    __u8 flags;
+    __u8 flags = 0U;
     int parsed = parse_flow(skb, control, SB_TC_FLAG_SHARED_IPV6, ethernet, true, &key, source_mac, &flags);
     if (parsed != SB_TC_PARSE_FLOW) return parse_pass(parsed, SB_TC_STAT_SHARED_FRAGMENT_PASS);
-    if (!ethernet &&
-        (control->flags & (SB_TC_FLAG_INCLUDE_SOURCE_MAC | SB_TC_FLAG_EXCLUDE_SOURCE_MAC)) != 0U) {
+    if (!ethernet && (control->flags & (SB_TC_FLAG_INCLUDE_SOURCE_MAC | SB_TC_FLAG_EXCLUDE_SOURCE_MAC)) != 0U)
         return TC_ACT_UNSPEC;
-    }
     if (!shared_selected(control, &key, source_mac)) return TC_ACT_UNSPEC;
-    skb->mark |= control->routing_mark;
-    __u8 path = SB_TC_PATH_SHARED;
-    if (ethernet) path |= SB_TC_PATH_SOURCE_MAC_VALID;
-    return assign_socket(skb, control, &key, source_mac, path);
+    return redirect_isolated(skb, control, &key, 0U,
+        SB_TC_PATH_SHARED | (ethernet ? SB_TC_RETURN_ETHERNET : 0U) | assignment_record(&key, flags));
 }
-
-SEC("classifier/shared_ingress_ethernet")
-int sing_ebpf_tc_shared_ingress_ethernet(struct __sk_buff *skb) {
-    return shared_ingress(skb, true);
-}
-
-SEC("classifier/shared_ingress_raw_ip")
-int sing_ebpf_tc_shared_ingress_raw_ip(struct __sk_buff *skb) {
-    return shared_ingress(skb, false);
-}
-
-INLINE int shared_ingress_legacy(struct __sk_buff *skb, bool ethernet) {
-    const struct sb_tc_control *control = load_control();
-    if (control == 0 || control->enabled == 0U) return TC_ACT_UNSPEC;
-    struct sb_tc_assign_key key;
-    __u8 source_mac[6];
-    __u8 flags;
-    int parsed = parse_flow(skb, control, SB_TC_FLAG_SHARED_IPV6, ethernet, true, &key, source_mac, &flags);
-    if (parsed != SB_TC_PARSE_FLOW) return parse_pass(parsed, SB_TC_STAT_SHARED_FRAGMENT_PASS);
-    if (!ethernet &&
-        (control->flags & (SB_TC_FLAG_INCLUDE_SOURCE_MAC | SB_TC_FLAG_EXCLUDE_SOURCE_MAC)) != 0U) {
-        return TC_ACT_UNSPEC;
-    }
-    if (!shared_selected(control, &key, source_mac)) return TC_ACT_UNSPEC;
-    skb->mark |= control->routing_mark;
-    __u8 path = SB_TC_PATH_SHARED;
-    if (ethernet) path |= SB_TC_PATH_SOURCE_MAC_VALID;
-    return assign_socket_legacy(skb, control, &key, source_mac, path);
-}
-
-SEC("classifier/shared_ingress_ethernet_legacy")
-int sing_ebpf_tc_shared_ingress_ethernet_legacy(struct __sk_buff *skb) {
-    return shared_ingress_legacy(skb, true);
-}
-
-SEC("classifier/shared_ingress_raw_ip_legacy")
-int sing_ebpf_tc_shared_ingress_raw_ip_legacy(struct __sk_buff *skb) {
-    return shared_ingress_legacy(skb, false);
-}
-
-INLINE int shared_ingress_udp(struct __sk_buff *skb, bool ethernet) {
-    const struct sb_tc_control *control = load_control();
-    if (control == 0 || control->enabled == 0U) return TC_ACT_UNSPEC;
-    struct sb_tc_assign_key key;
-    __u8 source_mac[6];
-    __u8 flags;
-    int parsed = parse_flow(skb, control, SB_TC_FLAG_SHARED_IPV6, ethernet, true, &key, source_mac, &flags);
-    if (parsed != SB_TC_PARSE_FLOW) return parse_pass(parsed, SB_TC_STAT_SHARED_FRAGMENT_PASS);
-    if (!ethernet &&
-        (control->flags & (SB_TC_FLAG_INCLUDE_SOURCE_MAC | SB_TC_FLAG_EXCLUDE_SOURCE_MAC)) != 0U) {
-        return TC_ACT_UNSPEC;
-    }
-    if (!shared_selected(control, &key, source_mac)) return TC_ACT_UNSPEC;
-    skb->mark |= control->routing_mark;
-    __u8 path = SB_TC_PATH_SHARED;
-    if (ethernet) path |= SB_TC_PATH_SOURCE_MAC_VALID;
-    return assign_udp_socket(skb, control, &key, source_mac, path);
-}
-
-SEC("classifier/shared_ingress_ethernet_udp")
-int sing_ebpf_tc_shared_ingress_ethernet_udp(struct __sk_buff *skb) {
-    return shared_ingress_udp(skb, true);
-}
-
-SEC("classifier/shared_ingress_raw_ip_udp")
-int sing_ebpf_tc_shared_ingress_raw_ip_udp(struct __sk_buff *skb) {
-    return shared_ingress_udp(skb, false);
-}
-
-SEC("classifier/delivery_ingress")
-int sing_ebpf_tc_delivery_ingress(struct __sk_buff *skb) {
-    const struct sb_tc_control *control = load_control();
-    if (control == 0 || control->enabled == 0U) return TC_ACT_UNSPEC;
-    struct sb_tc_assign_key key;
-    __u8 source_mac[6];
-    __u8 flags;
-    if (parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6, true, false, &key, source_mac, &flags) != SB_TC_PARSE_FLOW)
-        return TC_ACT_UNSPEC;
-    skb->mark |= control->routing_mark;
-    return assign_socket(skb, control, &key, source_mac, SB_TC_PATH_DELIVERY);
-}
-
-SEC("classifier/delivery_ingress_legacy")
-int sing_ebpf_tc_delivery_ingress_legacy(struct __sk_buff *skb) {
-    const struct sb_tc_control *control = load_control();
-    if (control == 0 || control->enabled == 0U) return TC_ACT_UNSPEC;
-    struct sb_tc_assign_key key;
-    __u8 source_mac[6];
-    __u8 flags;
-    if (parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6, true, false, &key, source_mac, &flags) != SB_TC_PARSE_FLOW)
-        return TC_ACT_UNSPEC;
-    skb->mark |= control->routing_mark;
-    return assign_socket_legacy(skb, control, &key, source_mac, SB_TC_PATH_DELIVERY);
-}
-
-SEC("classifier/delivery_ingress_udp")
-int sing_ebpf_tc_delivery_ingress_udp(struct __sk_buff *skb) {
-    const struct sb_tc_control *control = load_control();
-    if (control == 0 || control->enabled == 0U) return TC_ACT_UNSPEC;
-    struct sb_tc_assign_key key;
-    __u8 source_mac[6];
-    __u8 flags;
-    if (parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6, true, false, &key, source_mac, &flags) != SB_TC_PARSE_FLOW)
-        return TC_ACT_UNSPEC;
-    skb->mark |= control->routing_mark;
-    return assign_udp_socket(skb, control, &key, source_mac, SB_TC_PATH_DELIVERY);
-}
+SEC("classifier/shared_ingress_ethernet_isolated")
+int sing_ebpf_tc_shared_ethernet_isolated(struct __sk_buff *skb) { return shared_isolated(skb, true); }
+SEC("classifier/shared_ingress_raw_ip_isolated")
+int sing_ebpf_tc_shared_raw_isolated(struct __sk_buff *skb) { return shared_isolated(skb, false); }
 
 char _license[] SEC("license") = "GPL";

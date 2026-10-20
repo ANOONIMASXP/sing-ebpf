@@ -12,7 +12,7 @@ import (
 // a backend that has not processed a packet.
 func TestSharedNetworkStatsReadCleanlyWithNoFailures(t *testing.T) {
 	policy := newTestSharedNetworkForceInterceptPolicy(t, "198.18.0.0/15")
-	backend, err := PrepareSharedPacketRewrite(nil, newTestSharedPacketRewriteConfig(policy, false))
+	backend, err := PrepareSharedPacketRewrite(newTestSharedPacketRewriteConfig(policy, false))
 	if err != nil {
 		t.Skipf("cannot prepare a real shared-network eBPF backend in this environment: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestSharedNetworkStatsReadCleanlyWithNoFailures(t *testing.T) {
 
 func TestSharedNetworkStatsAllCategoriesIndependent(t *testing.T) {
 	policy := newTestSharedNetworkForceInterceptPolicy(t, "198.18.0.0/15")
-	backend, err := PrepareSharedPacketRewrite(nil, newTestSharedPacketRewriteConfig(policy, false))
+	backend, err := PrepareSharedPacketRewrite(newTestSharedPacketRewriteConfig(policy, false))
 	if err != nil {
 		t.Skipf("cannot prepare a real shared-network eBPF backend in this environment: %v", err)
 	}

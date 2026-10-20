@@ -121,6 +121,9 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 		tracker.policyUID = uidPolicy
 		tracker.policyDefaultBypass = defaultBypass
 	}
+	// Establish cleanup before any hook can publish an application cookie.
+	// Appending it first also keeps cleanup attached until all writers detach.
+	tracker.attachReleaseCleanup(cgroupPath)
 	for _, hook := range processTrackerHooks(config) {
 		program, loadErr := newProcessTrackerProgram(hook, owners.FD(), tracker.policyUIDFD(), tracker.metadataFD(), tracker.policyDefaultBypass)
 		if loadErr != nil {
@@ -138,7 +141,6 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 		}
 		tracker.links = append(tracker.links, programLink)
 	}
-	tracker.attachReleaseCleanup(cgroupPath)
 	return tracker, nil
 }
 
@@ -177,11 +179,12 @@ func rollbackProcessTracker(tracker *ProcessTracker, startupErr error) (*Process
 	return nil, E.Errors(startupErr, closeErr)
 }
 
-// attachReleaseCleanup removes process ownership as soon as the socket dies.
-// The owner map remains an LRU map because sock_release is unavailable or
-// blocked by policy on some Android and older vendor kernels.
+// attachReleaseCleanup removes both ownership and optional UID policy metadata
+// as soon as the socket dies. The consumer's self-bypass release hook may cover
+// only its own cgroup, while our writers observe sockets across the root cgroup.
+// Both maps retain LRU fallback when sock_release cannot be loaded or attached.
 func (t *ProcessTracker) attachReleaseCleanup(cgroupPath string) {
-	program, err := newProcessTrackerReleaseProgram(t.owners.FD())
+	program, err := newProcessTrackerReleaseProgram(t.owners.FD(), t.metadataFD())
 	if err != nil {
 		return
 	}
@@ -230,13 +233,13 @@ func newProcessTrackerProgram(hook processTrackerHook, ownerMapFD, policyUIDMapF
 	return program, nil
 }
 
-func newProcessTrackerReleaseProgram(ownerMapFD int) (*CiliumEBPF.Program, error) {
+func newProcessTrackerReleaseProgram(ownerMapFD, metadataMapFD int) (*CiliumEBPF.Program, error) {
 	program, err := CiliumEBPF.NewProgram(&CiliumEBPF.ProgramSpec{
 		Name:         kernelProgramNameProcessRelease,
 		Type:         CiliumEBPF.CGroupSock,
 		AttachType:   CiliumEBPF.AttachCgroupInetSockRelease,
 		License:      "GPL",
-		Instructions: processTrackerReleaseInstructions(ownerMapFD),
+		Instructions: processTrackerReleaseInstructions(ownerMapFD, metadataMapFD),
 	})
 	if err != nil {
 		return nil, E.Cause(err, "load eBPF process tracker socket-release hook")
@@ -244,8 +247,8 @@ func newProcessTrackerReleaseProgram(ownerMapFD int) (*CiliumEBPF.Program, error
 	return program, nil
 }
 
-func processTrackerReleaseInstructions(ownerMapFD int) asm.Instructions {
-	return socketCookieDeleteInstructions(ownerMapFD)
+func processTrackerReleaseInstructions(ownerMapFD, metadataMapFD int) asm.Instructions {
+	return socketCookieDeleteInstructions(ownerMapFD, metadataMapFD)
 }
 
 func processTrackerInstructions(ownerMapFD, policyUIDMapFD, metadataMapFD int, defaultBypass bool) asm.Instructions {
@@ -301,7 +304,9 @@ func processTrackerInstructions(ownerMapFD, policyUIDMapFD, metadataMapFD int, d
 		asm.Ja.Label("lookup_policy_uid"),
 		asm.StoreImm(asm.RFP, -28, 0, asm.Word).WithSymbol("metadata_empty"),
 		asm.LoadMem(asm.R0, asm.RFP, -12, asm.Word).WithSymbol("lookup_policy_uid"),
-		asm.BSwap(asm.R0, asm.Word),
+		// UID trie keys are network-order, not unconditionally byte-swapped.
+		// The classic END instruction also works before BPF ISA v4.
+		asm.HostTo(asm.BE, asm.R0, asm.Word),
 		asm.StoreMem(asm.RFP, -20, asm.R0, asm.Word),
 		asm.LoadMapPtr(asm.R1, policyUIDMapFD),
 		asm.Mov.Reg(asm.R2, asm.RFP),

@@ -20,6 +20,8 @@ const (
 	CgroupMapCgroupBypassIpv6            = "cgroup_bypass_ipv6"
 	CgroupMapCgroupBypassPort            = "cgroup_bypass_port"
 	CgroupMapCgroupControl               = "cgroup_control"
+	CgroupMapCgroupForce4                = "cgroup_force4"
+	CgroupMapCgroupForce6                = "cgroup_force6"
 	CgroupMapCgroupHostIpv4              = "cgroup_host_ipv4"
 	CgroupMapCgroupHostIpv6              = "cgroup_host_ipv6"
 	CgroupMapCgroupSocketBypass          = "cgroup_socket_bypass"
@@ -122,6 +124,8 @@ type CgroupMapSpecs struct {
 	CgroupBypassIpv6       *ebpf.MapSpec `ebpf:"cgroup_bypass_ipv6"`
 	CgroupBypassPort       *ebpf.MapSpec `ebpf:"cgroup_bypass_port"`
 	CgroupControl          *ebpf.MapSpec `ebpf:"cgroup_control"`
+	CgroupForce4           *ebpf.MapSpec `ebpf:"cgroup_force4"`
+	CgroupForce6           *ebpf.MapSpec `ebpf:"cgroup_force6"`
 	CgroupHostIpv4         *ebpf.MapSpec `ebpf:"cgroup_host_ipv4"`
 	CgroupHostIpv6         *ebpf.MapSpec `ebpf:"cgroup_host_ipv6"`
 	CgroupSocketBypass     *ebpf.MapSpec `ebpf:"cgroup_socket_bypass"`
@@ -168,6 +172,8 @@ type CgroupMaps struct {
 	CgroupBypassIpv6       *ebpf.Map `ebpf:"cgroup_bypass_ipv6"`
 	CgroupBypassPort       *ebpf.Map `ebpf:"cgroup_bypass_port"`
 	CgroupControl          *ebpf.Map `ebpf:"cgroup_control"`
+	CgroupForce4           *ebpf.Map `ebpf:"cgroup_force4"`
+	CgroupForce6           *ebpf.Map `ebpf:"cgroup_force6"`
 	CgroupHostIpv4         *ebpf.Map `ebpf:"cgroup_host_ipv4"`
 	CgroupHostIpv6         *ebpf.Map `ebpf:"cgroup_host_ipv6"`
 	CgroupSocketBypass     *ebpf.Map `ebpf:"cgroup_socket_bypass"`
@@ -190,6 +196,8 @@ func (m *CgroupMaps) Close() error {
 		m.CgroupBypassIpv6,
 		m.CgroupBypassPort,
 		m.CgroupControl,
+		m.CgroupForce4,
+		m.CgroupForce6,
 		m.CgroupHostIpv4,
 		m.CgroupHostIpv6,
 		m.CgroupSocketBypass,

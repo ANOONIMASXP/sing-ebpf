@@ -53,6 +53,18 @@ metadata), not by the consumer feature.
 
 ## Ordinary Go changes
 
+Namespace socket-assignment changes additionally require
+`TestTCNamespaceLifetimeIntegration`, `TestTCIsolatedVerifierIntegration`,
+`TestTCIsolatedRoundTripIntegration`, `TestTCIsolatedExistingSNATIntegration`
+and `TestTCReturnRouteLifetimeIntegration`. These verify TCP/UDP tuple
+preservation, local/shared delivery, IPv4/IPv6, local raw-IP framing, host port
+conflicts, existing SNAT, large fragmented UDP replies, filter/veth repair and
+pinned return-map capacity.
+SNAT tests need `iptables` only in the test environment; production does not.
+Do not flush the host conntrack table to make a test pass. Keep real-device
+checks separate from namespace test evidence, particularly vendor raw-IP
+interfaces and NIC MTU/offload behavior.
+
 The library is build-tagged for Linux/Android eBPF consumers. Run:
 
 ```sh
@@ -140,18 +152,18 @@ the map can itself fault affected kernels, so the safety deny-list and positive
 BTF evidence are kept separate from ordinary capability selection.
 
 Current important fallbacks include TCX → owned `clsact`, SOCKMAP-capable TCP →
-legacy TCP lookup, an MPTCP TCP listener (the Go default since Go 1.24, which a
-SOCKMAP rejects) → listener lookup by port, which needs a wildcard bind,
+legacy TCP lookup, a listener the SOCKMAP rejects (an MPTCP listener, the Go
+default since Go 1.24) → direct listener lookup selected at registration,
 cgroup socket-release notification → bounded LRU cleanup,
 socket-release probe permission denial → the same bounded LRU cleanup, and
 cgroup multi-program → compatible legacy exclusive attachment, and a root hook
 held by the Android 15+ netd pass-through placeholder → unflagged replacement
-of that placeholder, restored on detach. Do not turn
-an optional fallback failure into a silent feature claim; diagnostics must name
-the effective path. In particular, the runtime cgroup diagnostics distinguish
-`link_create`, `legacy_multi`, `legacy_exclusive`, `legacy_netd_replace`, and
-`mixed` attachment paths,
-as well as the effective UDP cleanup, socket-storage, and time-source modes.
+of that placeholder, restored on detach. Do not turn an optional fallback
+failure into a silent feature claim; diagnostics must name the effective path.
+In particular, the runtime cgroup diagnostics distinguish `link_create`,
+`legacy_multi`, `legacy_exclusive`, `legacy_netd_replace`, and `mixed`
+attachment paths, as well as the effective UDP cleanup, socket-storage, and
+time-source modes.
 The socket-release capability probe is deliberately multi-only: it must never
 fall back to an unflagged attach that could replace an existing cgroup owner.
 The ordinary cgroup hook attach may still use the legacy-exclusive fallback
@@ -234,8 +246,7 @@ is evicted at the bound instead of accumulating unbounded state.
 
 `runtime.TCRuntime.TCDiagnostics` is a request-driven, value-only snapshot of
 the effective TC socket-assignment runtime. It reports the actual TCX/clsact
-attachment mode (including `mixed`), SOCKMAP versus direct listener lookup
-(`mixed` when one listener family is found by port),
+attachment mode (including `mixed`), SOCKMAP versus direct listener lookup,
 delivery interface and policy-routing values, active and retired resource
 counts, priority, and whether the backend requires a rebuild. It does not
 expose maps, programs, links, file descriptors, or netlink objects.
@@ -293,7 +304,7 @@ than choosing a non-default priority.
 The privileged matrix should cover all affected combinations:
 
 - IPv4 and IPv6; TCP and UDP;
-- local TC and cgroup; shared socket assignment and packet rewrite;
+- local socket assignment and cgroup; shared socket assignment and packet rewrite;
 - Ethernet and supported raw-IP framing where applicable;
 - object-load and attach fallback selection;
 - interface absence, recreation, role change, and ifindex reuse;
@@ -385,3 +396,34 @@ consumer builds with and without eBPF support
 Keep implementation commits reviewable and independently revertible. A release
 tag marks a tested compatibility point; it should not be created for every
 commit.
+
+## Compatibility CI and performance evidence
+
+`Kernel compatibility` builds checksum-pinned 4.19.325, 5.4.290, 5.10.240 and
+6.6.110 kernels with vmtest 0.18.0:
+
+- 4.19 is a restricted profile: cgroup and shared packet-rewrite TCP/UDP,
+  including IPv4/IPv6 object loads, policy fixtures, real bidirectional traffic,
+  original-destination lookup and teardown. The pinned 4.19.325 stable kernel
+  backports cgroup UDP recvmsg hooks; both connected and unconnected UDP are
+  required. Negative checks reject socket assignment, not UDP. This does not
+  imply that every older 4.19 patch level or vendor kernel has the backport.
+- 5.4 additionally requires cgroup UDP recovery tests and shared rewrite
+  ICMP/clsact replacement. Both legacy
+  profiles require packet-rewrite zero-checksum/partial-checksum delivery.
+- 5.10/6.6 run the full namespace suite with optional TCX fallback.
+
+The 4.19/5.4 selections fail on skipped or empty test runs. The IPv4/IPv6 veth
+round-trip fixture uses static neighbors to isolate token rewriting from ARP/NDP
+policy. Host tests do not prove these guest jobs, OpenWrt firmware, physical NIC
+offloads or Android vendor kernels passed; check their logs and device evidence.
+
+Benchmark without concurrent compilation:
+`go test -bench BenchmarkOOBBatchReceive -benchmem ./common/udpio` in sing-box,
+and as root here:
+`SING_EBPF_INTEGRATION=1 go test -tags with_ebpf,ebpf_integration ./internal/core -run '^$' -bench BenchmarkTCSharedSteadyFlow`.
+
+On development WSL x86-64, eight-packet loopback receive metadata reuse reduced
+10 allocations/~968 B to 8 allocations/~516–521 B per batch. TC timestamp
+coalescing measured 115–118 kernel ns/packet versus 113–120 before: no clear
+single-core speedup. These are not real-device throughput or latency claims.

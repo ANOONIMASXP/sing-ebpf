@@ -495,6 +495,9 @@ func (b *CgroupBackend) SweepUDPRecovery(maxIdle time.Duration, fallbackBudget u
 			}
 		},
 	)
+	if scan.Restarted {
+		b.recoverySweepRemoved = 0
+	}
 	if err != nil {
 		return UDPRecoverySweepResult{}, err
 	}
@@ -515,14 +518,11 @@ func (b *CgroupBackend) SweepUDPRecovery(maxIdle time.Duration, fallbackBudget u
 			return result, err
 		}
 		result.Removed++
+		b.recoverySweepRemoved++
 	}
 	if result.Complete {
-		result.Usage.Entries = scan.Entries
-		if result.Removed >= result.Usage.Entries {
-			result.Usage.Entries = 0
-		} else {
-			result.Usage.Entries -= result.Removed
-		}
+		result.Usage.Entries = scan.Entries - min(scan.Entries, b.recoverySweepRemoved)
+		b.recoverySweepRemoved = 0
 	}
 	return result, nil
 }

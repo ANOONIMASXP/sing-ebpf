@@ -127,9 +127,8 @@ func prepareIPv6CgroupBackend(t *testing.T, path string, redirectIPv6 netip.Pref
 	}
 	defer selfBypassMap.Close()
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
-		Local:     ActionScope{Default: DecisionIntercept},
-		Shared:    ActionScope{Default: DecisionIntercept},
+		Local:  ActionScope{Default: DecisionIntercept},
+		Shared: ActionScope{Default: DecisionIntercept},
 	})
 	if err != nil {
 		t.Fatal(err)

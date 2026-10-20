@@ -101,7 +101,7 @@ func newICMPEchoReplyTCBackend(t *testing.T, prefix netip.Prefix, listenerPort u
 		Default:         commonEBPF.DecisionIntercept,
 		DestinationCIDR: []commonEBPF.CIDRDecision{{Prefix: prefix, Action: commonEBPF.DecisionIntercept}},
 	}
-	policy, err := commonEBPF.CompileActionPolicy(commonEBPF.ActionPolicy{EnableTCP: true, Local: scope, Shared: scope})
+	policy, err := commonEBPF.CompileActionPolicy(commonEBPF.ActionPolicy{Local: scope, Shared: scope})
 	if err != nil {
 		t.Fatalf("compile policy: %v", err)
 	}

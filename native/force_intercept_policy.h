@@ -4,50 +4,37 @@
 #ifndef SING_EBPF_FORCE_INTERCEPT_POLICY_H
 #define SING_EBPF_FORCE_INTERCEPT_POLICY_H
 
-#include "force_intercept_slot.h"
-#include "private_address.h"
+#include "bpf_compat.h"
+#include <linux/bpf.h>
 
-// ForceIntercept destinations are mandatory interception targets. The caller supplies
-// the data-plane-specific flag and normalized prefix from its control object.
-static __attribute__((always_inline)) bool sb_ebpf_force_intercept_ipv4(
-    const __u8 destination[4],
-    __u32 flags,
-    __u32 enabled_flag,
-    const __u8 prefix[4],
-    const __u8 mask[4]) {
-    return (flags & enabled_flag) != 0U &&
-        sb_ebpf_ipv4_prefix_match(destination, prefix, mask);
-}
+struct sb_force4_key { __u32 prefixlen; __u8 address[4]; };
+struct sb_force6_key { __u32 prefixlen; __u8 address[16]; };
 
-static __attribute__((always_inline)) bool sb_ebpf_force_intercept_ipv6(
-    const __u8 destination[16],
-    __u32 flags,
-    __u32 enabled_flag,
-    const __u8 prefix[16],
-    const __u8 mask[16]) {
-    return (flags & enabled_flag) != 0U &&
-        sb_ebpf_prefix_match(destination, prefix, mask);
-}
+// Immutable scoped sets; sized by the loader, without entry preallocation.
+#define SB_FORCE_MAPS(name) \
+    struct bpf_map_def SEC("maps") name##_force4 = { \
+        .type = BPF_MAP_TYPE_LPM_TRIE, .key_size = sizeof(struct sb_force4_key), \
+        .value_size = 1U, .max_entries = 1U, .map_flags = BPF_F_NO_PREALLOC, \
+    }; \
+    struct bpf_map_def SEC("maps") name##_force6 = { \
+        .type = BPF_MAP_TYPE_LPM_TRIE, .key_size = sizeof(struct sb_force6_key), \
+        .value_size = 1U, .max_entries = 1U, .map_flags = BPF_F_NO_PREALLOC, \
+    }
 
-// A destination is force-intercepted when it matches any enabled slot.
-static __attribute__((always_inline)) bool sb_ebpf_force_intercept_slots_ipv4(
-    const __u8 destination[4],
-    __u32 flags,
-    __u32 slot0_flag,
-    __u32 slot1_flag,
-    const struct sb_ebpf_force_intercept_slot slots[SB_EBPF_FORCE_INTERCEPT_SLOTS]) {
-    return sb_ebpf_force_intercept_ipv4(destination, flags, slot0_flag, slots[0].ipv4_prefix, slots[0].ipv4_mask) ||
-        sb_ebpf_force_intercept_ipv4(destination, flags, slot1_flag, slots[1].ipv4_prefix, slots[1].ipv4_mask);
-}
+#define SB_FORCE_LOOKUP(name) \
+    INLINE bool name##_force_ipv4(const __u8 address[4]) { \
+        struct sb_force4_key key = {.prefixlen = 32U}; \
+        __builtin_memcpy(key.address, address, 4U); \
+        return map_lookup(&name##_force4, &key) != 0; \
+    } \
+    INLINE bool name##_force_ipv6(const __u8 address[16]) { \
+        struct sb_force6_key key = {.prefixlen = 128U}; \
+        __builtin_memcpy(key.address, address, 16U); \
+        return map_lookup(&name##_force6, &key) != 0; \
+    }
 
-static __attribute__((always_inline)) bool sb_ebpf_force_intercept_slots_ipv6(
-    const __u8 destination[16],
-    __u32 flags,
-    __u32 slot0_flag,
-    __u32 slot1_flag,
-    const struct sb_ebpf_force_intercept_slot slots[SB_EBPF_FORCE_INTERCEPT_SLOTS]) {
-    return sb_ebpf_force_intercept_ipv6(destination, flags, slot0_flag, slots[0].ipv6_prefix, slots[0].ipv6_mask) ||
-        sb_ebpf_force_intercept_ipv6(destination, flags, slot1_flag, slots[1].ipv6_prefix, slots[1].ipv6_mask);
-}
+#define SB_PORT_PASS 1U
+#define SB_PORT_INTERCEPT 2U
+#define SB_PORT_AFTER_SELECTORS 4U
 
 #endif

@@ -227,10 +227,10 @@ func TestTCLocalProgramsDoNotUseTGIDHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, section := range []string{
-		"classifier/local_egress_ethernet_mark",
-		"classifier/local_egress_raw_ip_mark",
-		"classifier/local_egress_ethernet_process",
-		"classifier/local_egress_raw_ip_process",
+		"classifier/local_egress_ethernet_isolated",
+		"classifier/local_egress_raw_ip_isolated",
+		"classifier/local_egress_ethernet_isolated_process",
+		"classifier/local_egress_raw_ip_isolated_process",
 	} {
 		for _, program := range spec.Programs {
 			if program.SectionName != section {
@@ -251,10 +251,10 @@ func TestTCLocalProgramsUseSocketCookieHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	sections := map[string]bool{
-		"classifier/local_egress_ethernet_mark":    true,
-		"classifier/local_egress_raw_ip_mark":      true,
-		"classifier/local_egress_ethernet_process": true,
-		"classifier/local_egress_raw_ip_process":   true,
+		"classifier/local_egress_ethernet_isolated":         true,
+		"classifier/local_egress_raw_ip_isolated":           true,
+		"classifier/local_egress_ethernet_isolated_process": true,
+		"classifier/local_egress_raw_ip_isolated_process":   true,
 	}
 	for _, program := range spec.Programs {
 		expected, selected := sections[program.SectionName]
@@ -319,9 +319,15 @@ func TestCgroupReleaseNotificationUsesRingBufferHelper(t *testing.T) {
 
 func TestEmbeddedTCObjectLayout(t *testing.T) {
 	testEmbeddedObjectLayout(t, loadTC, map[string]objectMapLayout{
-		"tc_control":             {4, 112},
+		"tc_control":             {4, 32},
+		"tc_local_force4":        {8, 1},
+		"tc_local_force6":        {20, 1},
+		"tc_shared_force4":       {8, 1},
+		"tc_shared_force6":       {20, 1},
 		"tc_listener_sockets":    {4, 4},
 		"tc_assignment":          {44, 32},
+		"tc_return":              {44, 40},
+		"tc_return_frag":         {44, 40},
 		"tc_stats":               {4, 8},
 		"tc_self_sockets":        {8, 4},
 		"tc_uid_policy":          {8, 1},
@@ -340,13 +346,16 @@ func TestEmbeddedTCObjectLayout(t *testing.T) {
 		"tc_local_bypass_port":   {4, 1},
 		"tc_shared_bypass_port":  {4, 1},
 	}, []string{
-		"classifier/local_egress_ethernet_mark",
-		"classifier/local_egress_raw_ip_mark",
-		"classifier/local_egress_ethernet_process",
-		"classifier/local_egress_raw_ip_process",
-		"classifier/shared_ingress_ethernet",
-		"classifier/shared_ingress_raw_ip",
-		"classifier/delivery_ingress",
+		"classifier/local_egress_ethernet_isolated",
+		"classifier/local_egress_raw_ip_isolated",
+		"classifier/local_egress_ethernet_isolated_process",
+		"classifier/local_egress_raw_ip_isolated_process",
+		"classifier/shared_ingress_ethernet_isolated",
+		"classifier/shared_ingress_raw_ip_isolated",
+		"classifier/isolated_delivery",
+		"classifier/isolated_delivery_legacy",
+		"classifier/isolated_delivery_udp",
+		"classifier/isolated_return",
 	})
 }
 

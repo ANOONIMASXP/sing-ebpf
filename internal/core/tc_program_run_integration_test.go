@@ -16,10 +16,10 @@ func TestTCProgramRunIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "run unified TC eBPF programs in the kernel")
 	requireTCSocketAssignment(t)
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
-		Local:     ActionScope{Default: DecisionIntercept},
+		Local: ActionScope{Default: DecisionIntercept},
 		Shared: ActionScope{
-			Default:         DecisionIntercept,
+			DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionIntercept, AfterSelectors: true}},
+			Default:         DecisionPass,
 			DestinationCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass}, {Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept}},
 			SourceMAC:       []MACDecision{{Address: MACAddress{0x02, 0, 0, 0, 0, 1}, Action: DecisionIntercept}},
 			SourceCIDR:      []CIDRDecision{{Prefix: netip.MustParsePrefix("192.0.2.0/24"), Action: DecisionIntercept}, {Prefix: netip.MustParsePrefix("203.0.113.0/24"), Action: DecisionPass}},
@@ -29,11 +29,12 @@ func TestTCProgramRunIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend, err := PrepareTC(TCConfig{
-		ListenerPort: 65531,
-		EnableShared: true,
-		EnableIPv4:   true,
-		EnableTCP:    true,
-		Policy:       policy,
+		DeliveryInterface: 1,
+		ListenerPort:      65531,
+		EnableShared:      true,
+		EnableIPv4:        true,
+		EnableTCP:         true,
+		Policy:            policy,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -48,14 +49,17 @@ func TestTCProgramRunIntegration(t *testing.T) {
 		netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("203.0.113.10"), 53000, 443,
 	)
 	action, _ := runTCProgram(t, sharedIngress, selected)
-	if action != testTCActShot {
+	if action != testTCActRedirect {
 		t.Fatalf("selected flow did not reach socket assignment: action=%d", action)
 	}
 
 	matchedCIDR := append([]byte(nil), selected...)
 	matchedCIDR[11] = 2
+	// A different client must use a distinct tuple: return routes deliberately
+	// reject one tuple claimed by different source MACs.
+	binary.BigEndian.PutUint16(matchedCIDR[34:36], 54000)
 	action, _ = runTCProgram(t, sharedIngress, matchedCIDR)
-	if action != testTCActShot {
+	if action != testTCActRedirect {
 		t.Fatalf("source CIDR match did not select a client without the included MAC: action=%d", action)
 	}
 
@@ -91,7 +95,7 @@ func TestTCProgramRunIntegration(t *testing.T) {
 	)
 	forceIntercept[11] = 2
 	action, _ = runTCProgram(t, sharedIngress, forceIntercept)
-	if action != testTCActShot {
+	if action != testTCActRedirect {
 		t.Fatalf("ForceIntercept did not override source and private bypass: action=%d", action)
 	}
 
@@ -109,7 +113,7 @@ func TestTCProgramRunIntegration(t *testing.T) {
 		netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("1.1.1.1"), 53006, 53,
 	)
 	action, _ = runTCProgram(t, sharedIngress, respectedDNS)
-	if action != testTCActShot {
+	if action != testTCActRedirect {
 		t.Fatalf("respect_policy DNS did not override destination bypass: action=%d", action)
 	}
 
@@ -117,8 +121,8 @@ func TestTCProgramRunIntegration(t *testing.T) {
 
 func TestForceInterceptPolicyPrecedenceIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify ForceIntercept policy precedence in every TC data plane")
-	// Both force-intercept slots of each family are in use: the echo-reply
-	// prefixes take slot 0 and the second prefixes slot 1.
+	// Each family carries two force-intercept prefixes, and only the first
+	// of each is answered by ICMP echo reply.
 	destinations := []CIDRDecision{
 		{Prefix: netip.MustParsePrefix("192.168.0.0/16"), Action: DecisionPass},
 		{Prefix: netip.MustParsePrefix("198.18.0.0/15"), Action: DecisionIntercept, EchoReply: true},
@@ -127,9 +131,8 @@ func TestForceInterceptPolicyPrecedenceIntegration(t *testing.T) {
 		{Prefix: netip.MustParsePrefix("fd7a:115c:a1e0::/48"), Action: DecisionIntercept},
 	}
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
-		Local:     ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: destinations},
-		Shared:    ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: destinations, SourceMAC: []MACDecision{{Address: MACAddress{0x02, 0, 0, 0, 0, 3}, Action: DecisionIntercept}}},
+		Local:  ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: destinations},
+		Shared: ActionScope{Default: DecisionIntercept, DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 53, Action: DecisionPass}}, DestinationCIDR: destinations, SourceMAC: []MACDecision{{Address: MACAddress{0x02, 0, 0, 0, 0, 3}, Action: DecisionIntercept}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -144,12 +147,13 @@ func TestForceInterceptPolicyPrecedenceIntegration(t *testing.T) {
 	t.Run("socket_assign", func(t *testing.T) {
 		requireTCSocketAssignment(t)
 		backend, err := PrepareTC(TCConfig{
-			ListenerPort:     65531,
-			EnableShared:     true,
-			EnableIPv4:       true,
-			EnableSharedIPv6: true,
-			EnableTCP:        true,
-			Policy:           policy,
+			DeliveryInterface: 1,
+			ListenerPort:      65531,
+			EnableShared:      true,
+			EnableIPv4:        true,
+			EnableSharedIPv6:  true,
+			EnableTCP:         true,
+			Policy:            policy,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -165,7 +169,7 @@ func TestForceInterceptPolicyPrecedenceIntegration(t *testing.T) {
 		for name, packet := range forceInterceptPolicyPrecedencePackets() {
 			t.Run(name, func(t *testing.T) {
 				action, _ := runTCProgram(t, program, packet)
-				if action != testTCActShot {
+				if action != testTCActRedirect {
 					t.Fatalf("ForceIntercept did not override DNS, source, port, private, and CIDR bypass: action=%d", action)
 				}
 			})
@@ -173,7 +177,7 @@ func TestForceInterceptPolicyPrecedenceIntegration(t *testing.T) {
 	})
 
 	t.Run("packet_rewrite", func(t *testing.T) {
-		backend, err := PrepareSharedPacketRewrite(nil, SharedPacketRewriteConfig{
+		backend, err := PrepareSharedPacketRewrite(SharedPacketRewriteConfig{
 			ListenerPort: 65531,
 			EnableTCP:    true,
 			RedirectIPv4: netip.MustParsePrefix("127.128.0.0/9"),
@@ -212,10 +216,10 @@ func forceInterceptPolicyPrecedencePackets() map[string][]byte {
 		"IPv6": testIPv6TCPPacket(
 			netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("fd00:198:18::1"), 53001, 53, nil,
 		),
-		"IPv4 second slot": testIPv4TCPPacket(
+		"IPv4 second prefix": testIPv4TCPPacket(
 			netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("100.64.1.1"), 53002, 53,
 		),
-		"IPv6 second slot": testIPv6TCPPacket(
+		"IPv6 second prefix": testIPv6TCPPacket(
 			netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("fd7a:115c:a1e0::1"), 53003, 53, nil,
 		),
 	}
@@ -234,16 +238,7 @@ func TestTCIPv6PathIsolationIntegration(t *testing.T) {
 		wantAction uint32
 	}{
 		{
-			// EnableShared is deliberately the only role enabled: with it
-			// off, tcProgramSharedIngressEthernet is never loaded at all
-			// (see prepareTC's config.EnableShared gate in tc.go), and
-			// backend.runtime.programs[tcProgramSharedIngressEthernet]
-			// stays nil -- indexing it below would still compile, but
-			// runTCProgram's Program.Run on a nil *ebpf.Program panics
-			// rather than failing the test with a clear message. This case
-			// previously enabled Local instead of Shared by mistake, which
-			// is exactly that nil-program panic; the fix is the config, not
-			// runTCProgram or the loader.
+			// IPv6 selection is scoped to the ingress/egress role.
 			"shared IPv6 disabled on shared program",
 			TCConfig{EnableShared: true, EnableIPv4: true, EnableTCP: true},
 			tcProgramSharedIngressEthernet,
@@ -253,27 +248,24 @@ func TestTCIPv6PathIsolationIntegration(t *testing.T) {
 			"shared enabled on shared program",
 			TCConfig{EnableShared: true, EnableIPv4: true, EnableSharedIPv6: true, EnableTCP: true},
 			tcProgramSharedIngressEthernet,
-			testTCActShot,
+			testTCActRedirect,
 		},
 		{
-			"local enabled on delivery program",
+			"local enabled on local program",
 			TCConfig{EnableLocal: true, EnableIPv4: true, EnableLocalIPv6: true, EnableTCP: true},
-			tcProgramDeliveryIngress,
-			testTCActShot,
+			tcProgramLocalEgressEthernet,
+			testTCActRedirect,
 		},
 		{
-			// Same fix as the first case, mirrored: tcProgramDeliveryIngress
-			// is only loaded when EnableLocal is set (it is part of the
-			// local TC path's veth infrastructure), so this needs Local
-			// enabled with its IPv6 specifically off, not Shared.
-			"local IPv6 disabled on delivery program",
+			"local IPv6 disabled on local program",
 			TCConfig{EnableLocal: true, EnableIPv4: true, EnableTCP: true},
-			tcProgramDeliveryIngress,
+			tcProgramLocalEgressEthernet,
 			testTCActUnspec,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			testCase.config.ListenerPort = 65531
+			testCase.config.DeliveryInterface = 1
 			backend, err := PrepareTC(testCase.config)
 			if err != nil {
 				t.Fatal(err)
@@ -294,11 +286,12 @@ func TestTCFragmentPolicyIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify TC eBPF fragment policy")
 	requireTCSocketAssignment(t)
 	backend, err := PrepareTC(TCConfig{
-		ListenerPort:     65531,
-		EnableShared:     true,
-		EnableIPv4:       true,
-		EnableSharedIPv6: true,
-		EnableTCP:        true,
+		DeliveryInterface: 1,
+		ListenerPort:      65531,
+		EnableShared:      true,
+		EnableIPv4:        true,
+		EnableSharedIPv6:  true,
+		EnableTCP:         true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +330,7 @@ func TestTCFragmentPolicyIntegration(t *testing.T) {
 	}{
 		{"IPv6 first fragment", &moreFragments, testTCActUnspec},
 		{"IPv6 later fragment", &laterFragment, testTCActUnspec},
-		{"IPv6 atomic fragment", &atomicFragment, testTCActShot},
+		{"IPv6 atomic fragment", &atomicFragment, testTCActRedirect},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			packet := testIPv6TCPPacket(
@@ -354,7 +347,7 @@ func TestTCFragmentPolicyIntegration(t *testing.T) {
 
 func TestSharedPacketRewriteFragmentPolicyIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify shared packet-rewrite fragment policy")
-	backend, err := PrepareSharedPacketRewrite(nil, SharedPacketRewriteConfig{
+	backend, err := PrepareSharedPacketRewrite(SharedPacketRewriteConfig{
 		ListenerPort: 65531,
 		EnableTCP:    true,
 		RedirectIPv4: netip.MustParsePrefix("127.128.0.0/9"),

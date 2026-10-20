@@ -26,6 +26,8 @@ const (
 	SharedNetworkMapSharedExcludeSourceMac  = "shared_exclude_source_mac"
 	SharedNetworkMapSharedFlowByOriginal    = "shared_flow_by_original"
 	SharedNetworkMapSharedFlowByToken       = "shared_flow_by_token"
+	SharedNetworkMapSharedForce4            = "shared_force4"
+	SharedNetworkMapSharedForce6            = "shared_force6"
 	SharedNetworkMapSharedHostIpv4          = "shared_host_ipv4"
 	SharedNetworkMapSharedHostIpv6          = "shared_host_ipv6"
 	SharedNetworkMapSharedIncludeSourceIpv4 = "shared_include_source_ipv4"
@@ -97,6 +99,8 @@ type SharedNetworkMapSpecs struct {
 	SharedExcludeSourceMac  *ebpf.MapSpec `ebpf:"shared_exclude_source_mac"`
 	SharedFlowByOriginal    *ebpf.MapSpec `ebpf:"shared_flow_by_original"`
 	SharedFlowByToken       *ebpf.MapSpec `ebpf:"shared_flow_by_token"`
+	SharedForce4            *ebpf.MapSpec `ebpf:"shared_force4"`
+	SharedForce6            *ebpf.MapSpec `ebpf:"shared_force6"`
 	SharedHostIpv4          *ebpf.MapSpec `ebpf:"shared_host_ipv4"`
 	SharedHostIpv6          *ebpf.MapSpec `ebpf:"shared_host_ipv6"`
 	SharedIncludeSourceIpv4 *ebpf.MapSpec `ebpf:"shared_include_source_ipv4"`
@@ -142,6 +146,8 @@ type SharedNetworkMaps struct {
 	SharedExcludeSourceMac  *ebpf.Map `ebpf:"shared_exclude_source_mac"`
 	SharedFlowByOriginal    *ebpf.Map `ebpf:"shared_flow_by_original"`
 	SharedFlowByToken       *ebpf.Map `ebpf:"shared_flow_by_token"`
+	SharedForce4            *ebpf.Map `ebpf:"shared_force4"`
+	SharedForce6            *ebpf.Map `ebpf:"shared_force6"`
 	SharedHostIpv4          *ebpf.Map `ebpf:"shared_host_ipv4"`
 	SharedHostIpv6          *ebpf.Map `ebpf:"shared_host_ipv6"`
 	SharedIncludeSourceIpv4 *ebpf.Map `ebpf:"shared_include_source_ipv4"`
@@ -163,6 +169,8 @@ func (m *SharedNetworkMaps) Close() error {
 		m.SharedExcludeSourceMac,
 		m.SharedFlowByOriginal,
 		m.SharedFlowByToken,
+		m.SharedForce4,
+		m.SharedForce6,
 		m.SharedHostIpv4,
 		m.SharedHostIpv6,
 		m.SharedIncludeSourceIpv4,

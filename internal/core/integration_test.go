@@ -18,6 +18,7 @@ import (
 const (
 	integrationTestEnv = "SING_EBPF_INTEGRATION"
 	testTCActShot      = uint32(2)
+	testTCActRedirect  = uint32(7)
 	testTCActUnspec    = ^uint32(0)
 )
 

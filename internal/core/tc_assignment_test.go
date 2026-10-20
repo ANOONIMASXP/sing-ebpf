@@ -27,6 +27,15 @@ func newTestAssignmentBackend(t *testing.T) *TCBackend {
 	t.Cleanup(func() { _ = assignmentMap.Close() })
 	backend := &TCBackend{}
 	backend.runtime = &tcRuntime{maps: map[string]*CiliumEBPF.Map{"tc_assignment": assignmentMap}}
+	returnMap, err := CiliumEBPF.NewMap(&CiliumEBPF.MapSpec{
+		Type: CiliumEBPF.Hash, KeySize: uint32(unsafe.Sizeof(tcAssignKey{})),
+		ValueSize: uint32(unsafe.Sizeof(tcReturnValue{})), MaxEntries: 64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = returnMap.Close() })
+	backend.runtime.maps["tc_return"] = returnMap
 	backend.assignmentMapFD = assignmentMap.FD()
 	return backend
 }
@@ -221,9 +230,13 @@ func TestSweepAssignmentsRemovesOnlyUnchangedStaleEntries(t *testing.T) {
 	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err != nil {
 		t.Fatal(err)
 	}
-	// The oldest nonzero timestamp: subtracting a fixed age from the monotonic
-	// clock would wrap within that age of boot, as in a freshly started test VM.
 	value := expected
+	// A freshly booted test VM may not have one minute of uptime. Use a
+	// nonzero boot-time timestamp after the minimum cleanup grace instead
+	// of subtracting into an unsigned timestamp in the future.
+	if now := monotonicNowNS(); now <= uint64(2*time.Second) {
+		time.Sleep(2*time.Second - time.Duration(now) + time.Millisecond)
+	}
 	value.LastSeenNS = 1
 	if err = updateMap(backend.assignmentMapFD, unsafe.Pointer(&key), unsafe.Pointer(&value)); err != nil {
 		t.Fatal(err)
@@ -238,5 +251,53 @@ func TestSweepAssignmentsRemovesOnlyUnchangedStaleEntries(t *testing.T) {
 	}
 	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err == nil {
 		t.Fatal("stale assignment remains in map")
+	}
+}
+
+func TestSweepAssignmentsPreservesCoalescedActivity(t *testing.T) {
+	backend := newTestAssignmentBackend(t)
+	backend.assignmentCapacity = 64
+	source := netip.MustParseAddrPort("192.0.2.10:53000")
+	destination := netip.MustParseAddrPort("1.1.1.1:53")
+	now := monotonicNowNS()
+	value := TCAssignment{LastSeenNS: max(1, now-min(now, uint64(time.Second))), Generation: 42, InterfaceIndex: 17, Path: TCPathShared}
+	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 17, value)
+	key, err := makeTCAssignKey(ProtocolUDP, destination, source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	returnValue := tcReturnValue{LastSeenNS: value.LastSeenNS, Generation: 42, InterfaceIndex: 17}
+	if err = backend.runtime.maps["tc_return"].Put(key, returnValue); err != nil {
+		t.Fatal(err)
+	}
+
+	// A caller's subsecond timeout must not mistake the native one-second
+	// write coalescing window for inactivity, for either map.
+	result, err := backend.SweepAssignments(time.Nanosecond, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 0 || result.ReturnRemoved != 0 || !result.UsageKnown || !result.ReturnUsageKnown {
+		t.Fatalf("coalesced activity was reclaimed: %+v", result)
+	}
+	if _, err = backend.LookupAssignment(ProtocolUDP, source, destination, 17, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = backend.runtime.maps["tc_return"].Lookup(key, &returnValue); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSweepAssignmentsPreservesReturnFailureMap(t *testing.T) {
+	backend := newTestAssignmentBackend(t)
+	backend.assignmentCapacity = 64
+	delete(backend.runtime.maps, "tc_return")
+
+	result, err := backend.SweepAssignments(time.Second, 64)
+	if err == nil {
+		t.Fatal("sweep without the return map succeeded")
+	}
+	if result.Failure != TCAssignmentSweepFailureClosed || result.FailureMap != "sb_tc_return" {
+		t.Fatalf("sweep failure = %+v, want closed sb_tc_return", result)
 	}
 }

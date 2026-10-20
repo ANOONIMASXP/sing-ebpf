@@ -38,14 +38,22 @@ func compileUIDActionPolicy(decisions []UIDDecision, defaultAction Decision) ([]
 	if !defaultAction.Valid() {
 		return nil, false, E.New("invalid eBPF UID default action")
 	}
-	var uidRanges []UIDRange
+	var pass, intercept []UIDRange
 	for _, decision := range decisions {
 		if decision.Start > decision.End || !decision.Action.Valid() {
 			return nil, false, E.New("invalid eBPF UID decision")
 		}
-		if decision.Action != defaultAction {
-			uidRanges = append(uidRanges, UIDRange{Start: decision.Start, End: decision.End})
+		if decision.Action == DecisionPass {
+			pass = append(pass, UIDRange{Start: decision.Start, End: decision.End})
+		} else {
+			intercept = append(intercept, UIDRange{Start: decision.Start, End: decision.End})
 		}
+	}
+	uidRanges := normalizeUIDRanges(pass)
+	if defaultAction == DecisionPass {
+		// A pass decision is not redundant when it overlaps an intercept
+		// decision. Subtract it before encoding exceptions to the default.
+		uidRanges = subtractUIDRanges(intercept, pass)
 	}
 	entries := compileUIDRanges(normalizeUIDRanges(uidRanges))
 	if len(entries) > maxUIDPolicyEntries {

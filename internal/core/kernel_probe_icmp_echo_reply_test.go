@@ -16,7 +16,7 @@ import (
 // tc_icmp_echo_reply_test.go and the real attach proven in
 // the runtime package's netns tests.
 func TestProbeKernelICMPEchoReplyOnlyWhenRequested(t *testing.T) {
-	without, err := ProbeKernel(KernelProbeOptions{Mode: KernelProbeModeLocal, LocalDataPlane: KernelProbeDataPlaneTC})
+	without, err := ProbeKernel(KernelProbeOptions{Mode: KernelProbeModeLocal, LocalDataPlane: KernelProbeDataPlaneSocketAssign})
 	if err != nil {
 		t.Fatalf("probe without icmp_echo_reply: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestProbeKernelICMPEchoReplyOnlyWhenRequested(t *testing.T) {
 	}
 
 	with, err := ProbeKernel(KernelProbeOptions{
-		Mode: KernelProbeModeLocal, LocalDataPlane: KernelProbeDataPlaneTC,
+		Mode: KernelProbeModeLocal, LocalDataPlane: KernelProbeDataPlaneSocketAssign,
 		ICMPEchoReply: true,
 	})
 	if err != nil {

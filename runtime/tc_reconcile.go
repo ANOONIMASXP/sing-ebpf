@@ -4,7 +4,6 @@ package runtime
 
 import (
 	"errors"
-	"net"
 	"net/netip"
 	"os"
 	"slices"
@@ -32,6 +31,19 @@ func (d *tcDataPlane) reconcile(localInterface string, sharedInterfaces []string
 	desired, err := d.desiredAttachmentState(localInterface, sharedInterfaces)
 	if err != nil {
 		return err
+	}
+	if d.namespace != nil {
+		mtu, mtuErr := d.isolatedReplyMTU(localInterface, sharedInterfaces)
+		if mtuErr != nil {
+			return mtuErr
+		}
+		if d.delivery != nil && d.delivery.replyMTU != mtu {
+			d.delivery.replyMTU = mtu
+			if err = d.inNamespace(func() error { _, err := d.delivery.configureIsolatedPeer(true); return err }); err != nil {
+				return err
+			}
+		}
+		d.replyMTU = mtu
 	}
 	current := make(map[string]*tcInterfaceAttachment, len(d.attachments))
 	for _, attachment := range d.attachments {
@@ -513,9 +525,17 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
 	if err := d.closeRetired(); err != nil {
 		return false, err
 	}
-	routingChanged, routingErr := d.routing.ensure()
+	var routingChanged bool
+	routingErr := d.inNamespace(func() error { var err error; routingChanged, err = d.routing.ensure(); return err })
 	if d.delivery == nil {
 		return routingChanged, routingErr
+	}
+	if d.namespace != nil {
+		mtu, err := d.isolatedReplyMTU(d.localInterface, d.sharedInterfaces)
+		if err != nil {
+			return routingChanged, E.Errors(routingErr, err)
+		}
+		d.replyMTU, d.delivery.replyMTU = mtu, mtu
 	}
 	deliveryChanged, replaceDelivery, err := d.delivery.repair(d.backend, d.priority)
 	if err != nil {
@@ -524,7 +544,7 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
 	if !replaceDelivery {
 		return routingChanged || deliveryChanged, routingErr
 	}
-	delivery, err := d.createTCDeliveryLink()
+	delivery, err := d.createIsolatedTCDeliveryLink()
 	if err != nil {
 		if delivery != nil {
 			d.retainRetiredDelivery(delivery)
@@ -535,7 +555,6 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
 		)
 	}
 	previousDelivery := d.delivery
-	handoffTCGlobalSysctls(previousDelivery, delivery)
 	d.delivery = delivery
 	if err = previousDelivery.Close(); err != nil {
 		if !previousDelivery.IsClosed() {
@@ -547,107 +566,10 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
 }
 
 func (d *tcDeliveryLink) repair(backend *commonEBPF.TCBackend, priority uint16) (bool, bool, error) {
-	if d == nil || d.redirect == nil || d.delivery == nil || d.filter == nil {
+	if d == nil {
 		return false, true, nil
 	}
-	redirect, err := netlink.LinkByName(d.redirectName)
-	if err != nil && tcLinkNotFound(err) {
-		return false, true, nil
-	}
-	if err != nil {
-		return false, false, err
-	}
-	delivery, err := netlink.LinkByName(d.deliveryName)
-	if err != nil && tcLinkNotFound(err) {
-		return false, true, nil
-	}
-	if err != nil {
-		return false, false, err
-	}
-	if redirect.Attrs().Index != d.redirect.Attrs().Index ||
-		delivery.Attrs().Index != d.delivery.Attrs().Index {
-		return false, true, nil
-	}
-	d.redirect = redirect
-	d.delivery = delivery
-	changed := false
-	// Anything that changes the delivery interface's address after creation
-	// (an administrator, a network manager) leaves the backend redirecting
-	// frames to a MAC the interface no longer accepts.
-	deliveryMAC, valid := tcDeliveryMACAddress(delivery)
-	if !valid {
-		return false, true, nil
-	}
-	if deliveryMAC != d.deliveryMAC {
-		if err = backend.SetDeliveryInterface(uint32(redirect.Attrs().Index), deliveryMAC); err != nil {
-			return false, false, E.Cause(err, "update TC eBPF delivery address")
-		}
-		d.deliveryMAC = deliveryMAC
-		changed = true
-	}
-	for _, link := range []netlink.Link{redirect, delivery} {
-		if link.Attrs().Flags&net.FlagUp != 0 {
-			continue
-		}
-		if err = netlink.LinkSetUp(link); err != nil {
-			return changed, false, E.Cause(err, "restore TC eBPF delivery link ", link.Attrs().Name)
-		}
-		changed = true
-	}
-	filterAttached, err := tcFilterAttached(
-		delivery,
-		netlink.HANDLE_MIN_INGRESS,
-		"sb_tc_deliver",
-		tcDeliveryFilterHandle,
-		priority,
-	)
-	if err != nil {
-		return changed, false, err
-	}
-	if !filterAttached {
-		if err = ensureTCClsact(delivery); err != nil {
-			return changed, false, err
-		}
-		d.filter, err = attachTCFilter(
-			delivery,
-			netlink.HANDLE_MIN_INGRESS,
-			rawTCBackend(backend).DeliveryIngressProgramFD(),
-			"sb_tc_deliver",
-			tcDeliveryFilterHandle,
-			priority,
-		)
-		if err != nil {
-			return changed, false, err
-		}
-		changed = true
-	}
-	for _, setting := range []struct {
-		name  string
-		value string
-	}{
-		{"rp_filter", "0"},
-		{"accept_local", "1"},
-	} {
-		state, settingChanged, settingErr := setTCInterfaceSysctl(d.deliveryName, setting.name, setting.value)
-		if errors.Is(settingErr, os.ErrNotExist) {
-			return changed, true, nil
-		}
-		if settingErr != nil {
-			return changed, false, settingErr
-		}
-		if settingChanged {
-			d.sysctls = appendTCSysctlStates(d.sysctls, []tcSysctlState{state})
-			changed = true
-		}
-	}
-	aggregateChanged, err := d.claimAggregateRPFilter()
-	if aggregateChanged {
-		changed = true
-	}
-	if err != nil {
-		return changed, false, err
-	}
-	return changed, false, nil
+	return d.repairIsolated(backend, priority)
 }
 
 // closeStaleTCAttachmentsLocked releases the attachments that no longer describe

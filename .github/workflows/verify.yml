@@ -51,6 +51,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y iptables
           sudo env \
             "PATH=$PATH" \
             SING_EBPF_INTEGRATION=1 \

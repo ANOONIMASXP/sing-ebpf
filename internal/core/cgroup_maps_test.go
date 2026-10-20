@@ -11,11 +11,8 @@ import (
 )
 
 func TestCgroupNetworkGenerationABI(t *testing.T) {
-	if size := unsafe.Sizeof(cgroupControl{}); size != 112 {
+	if size := unsafe.Sizeof(cgroupControl{}); size != 32 {
 		t.Fatalf("unexpected cgroup control size: %d", size)
-	}
-	if offset := unsafe.Offsetof(cgroupControl{}.ForceIntercept); offset != 32 {
-		t.Fatalf("unexpected cgroup ForceIntercept offset: %d", offset)
 	}
 	if offset := unsafe.Offsetof(cgroupControl{}.NetworkGeneration); offset != 4 {
 		t.Fatalf("unexpected cgroup network generation offset: %d", offset)

@@ -6,8 +6,6 @@
 
 #include <linux/types.h>
 
-#include "force_intercept_slot.h"
-
 #define SB_SHARED_NETWORK_OBJECT_MAP_ENTRIES 65536U
 #define SB_SHARED_SOURCE_CIDR_MAP_ENTRIES 4096U
 #define SB_SHARED_SOURCE_MAC_MAP_ENTRIES 1024U
@@ -21,9 +19,6 @@
 #define SB_SHARED_STAT_COUNT 4U
 
 #define SB_SHARED_FLAG_IPV4 (1U << 0)
-#define SB_SHARED_DNS_MODE_HIJACK 0U
-#define SB_SHARED_DNS_MODE_RESPECT_POLICY 1U
-#define SB_SHARED_DNS_MODE_OFF 2U
 
 #define SB_SHARED_FLAG_IPV6 (1U << 1)
 #define SB_SHARED_FLAG_TCP (1U << 2)
@@ -36,12 +31,10 @@
 #define SB_SHARED_FLAG_EXCLUDE_SOURCE (1U << 10)
 #define SB_SHARED_FLAG_INCLUDE_SOURCE_MAC (1U << 11)
 #define SB_SHARED_FLAG_EXCLUDE_SOURCE_MAC (1U << 12)
-#define SB_SHARED_FLAG_BYPASS_PRIVATE_ADDRESS (1U << 13)
+#define SB_SHARED_FLAG_DEFAULT_BYPASS (1U << 13)
 #define SB_SHARED_FLAG_BYPASS_FLOW_CACHE (1U << 14)
 #define SB_SHARED_FLAG_FORCE_INTERCEPT_IPV4 (1U << 16)
 #define SB_SHARED_FLAG_FORCE_INTERCEPT_IPV6 (1U << 17)
-#define SB_SHARED_FLAG_FORCE_INTERCEPT_SLOT1_IPV4 (1U << 18)
-#define SB_SHARED_FLAG_FORCE_INTERCEPT_SLOT1_IPV6 (1U << 19)
 
 struct sb_shared_port_key {
     __u8 protocol;
@@ -53,14 +46,13 @@ struct sb_shared_control {
     __u32 enabled;
     __u32 flags;
     __u16 listener_port;
-    __u16 dns_mode;
+    __u16 reserved_policy;
     __u8 token_ipv4_prefix[4];
     __u8 token_ipv4_prefix_bits;
     __u8 token_ipv6_prefix_bits;
     __u8 reserved2[2];
     __u8 token_ipv6_prefix[16];
     __u32 udp_timeout_seconds;
-    struct sb_ebpf_force_intercept_slot force_intercept[SB_EBPF_FORCE_INTERCEPT_SLOTS];
 };
 
 struct sb_shared_original_key {
@@ -124,8 +116,7 @@ struct sb_shared_scratch {
     struct sb_shared_mac_key source_mac;
 };
 
-_Static_assert(sizeof(struct sb_shared_control) == 120U, "shared control ABI");
-_Static_assert(__builtin_offsetof(struct sb_shared_control, force_intercept) == 40U, "shared force-intercept ABI");
+_Static_assert(sizeof(struct sb_shared_control) == 40U, "shared control ABI");
 _Static_assert(sizeof(struct sb_shared_original_key) == 44U, "shared original key ABI");
 _Static_assert(sizeof(struct sb_shared_listener_key) == 40U, "shared listener key ABI");
 _Static_assert(sizeof(struct sb_shared_original_value) == 40U, "shared original value ABI");

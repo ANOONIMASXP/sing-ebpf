@@ -99,6 +99,7 @@ type CgroupBackend struct {
 	udpRecoveryAccess       sync.Mutex
 	recoverySweepScratch    mapScanScratch[listenerLookupKey, originalDestinationValue]
 	recoverySweepCandidates []udpRecoveryEntry
+	recoverySweepRemoved    uint32
 	udpReleaseReadAccess    sync.Mutex
 	udpReplyTokenSequence   atomic.Uint64
 	lookupAndDeleteMode     atomic.Int32
@@ -121,11 +122,9 @@ type CgroupBackend struct {
 	cgroupPath              string
 	redirectIPv4            netip.Prefix
 	redirectIPv6            netip.Prefix
-	forceIntercept          forceInterceptPolicy
 	enableIPv6              bool
 	enableUDP               bool
-	dnsMode                 DNSMode
-	bypassPrivateAddress    bool
+	forceIPv4, forceIPv6    bool
 	udpTimeoutSeconds       uint32
 	networkGeneration       uint32
 	listenerPort            uint16
@@ -251,7 +250,7 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 		socket_release_supported: socketReleaseSupported,
 		coarse_time_supported:    coarseTimeSupported,
 	}
-	if err = prepareCgroupMaps(runtimeState, mapCapacity, len(uidPolicyEntries), len(policy.localBypassPortEntries), config.SelfBypassMap); err != nil {
+	if err = prepareCgroupMaps(runtimeState, mapCapacity, len(uidPolicyEntries), len(policy.localBypassPortEntries), config.SelfBypassMap, policy.localForce); err != nil {
 		_ = closeMaps(runtimeState.maps)
 		closeCgroup()
 		if errors.Is(err, unix.EPERM) {
@@ -262,30 +261,31 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 		return nil, err
 	}
 	backend := &CgroupBackend{
-		mapCapacity:          mapCapacity,
-		runtime:              runtimeState,
-		tcpRedirectMapFD:     runtimeState.tcp_redirect_map_fd,
-		udpRedirectMapFD:     runtimeState.udp_redirect_map_fd,
-		udpRecoveryMapFD:     runtimeState.udp_recovery_map_fd,
-		udpFlowMapFD:         runtimeState.udp_flow_map_fd,
-		socketBypassMapFD:    runtimeState.bypass_socket_cookie_map_fd,
-		bypassIPv4CIDRMapFD:  runtimeState.bypass_ipv4_cidr_map_fd,
-		bypassIPv6CIDRMapFD:  runtimeState.bypass_ipv6_cidr_map_fd,
-		hostIPv4MapFD:        runtimeState.host_ipv4_map_fd,
-		hostIPv6MapFD:        runtimeState.host_ipv6_map_fd,
-		cgroupPath:           cgroupPath,
-		redirectIPv4:         redirectIPv4,
-		redirectIPv6:         redirectIPv6,
-		forceIntercept:       policy.forceIntercept,
-		enableIPv6:           config.EnableIPv6,
-		enableUDP:            config.EnableUDP,
-		dnsMode:              policy.localDNSMode,
-		bypassPrivateAddress: false,
-		udpTimeoutSeconds:    udpTimeoutSeconds,
-		bypassIPv4CIDR:       slices.Clone(policy.localInitialBypass.ipv4),
-		bypassIPv6CIDR:       slices.Clone(policy.localInitialBypass.ipv6),
+		mapCapacity:         mapCapacity,
+		runtime:             runtimeState,
+		tcpRedirectMapFD:    runtimeState.tcp_redirect_map_fd,
+		udpRedirectMapFD:    runtimeState.udp_redirect_map_fd,
+		udpRecoveryMapFD:    runtimeState.udp_recovery_map_fd,
+		udpFlowMapFD:        runtimeState.udp_flow_map_fd,
+		socketBypassMapFD:   runtimeState.bypass_socket_cookie_map_fd,
+		bypassIPv4CIDRMapFD: runtimeState.bypass_ipv4_cidr_map_fd,
+		bypassIPv6CIDRMapFD: runtimeState.bypass_ipv6_cidr_map_fd,
+		hostIPv4MapFD:       runtimeState.host_ipv4_map_fd,
+		hostIPv6MapFD:       runtimeState.host_ipv6_map_fd,
+		cgroupPath:          cgroupPath,
+		redirectIPv4:        redirectIPv4,
+		redirectIPv6:        redirectIPv6,
+		forceIPv4:           len(policy.localForce.ipv4) > 0,
+		forceIPv6:           len(policy.localForce.ipv6) > 0,
+		enableIPv6:          config.EnableIPv6,
+		enableUDP:           config.EnableUDP,
+		udpTimeoutSeconds:   udpTimeoutSeconds,
+		bypassIPv4CIDR:      slices.Clone(policy.localInitialBypass.ipv4),
+		bypassIPv6CIDR:      slices.Clone(policy.localInitialBypass.ipv6),
 	}
 	if err = populateCompiledPolicyMaps(policyMapTargets{
+		LocalForceIPv4:  runtimeState.maps["cgroup_force4"],
+		LocalForceIPv6:  runtimeState.maps["cgroup_force6"],
 		Scope:           "cgroup eBPF",
 		UID:             runtimeState.maps["cgroup_uid_policy"],
 		LocalPort:       runtimeState.maps["cgroup_bypass_port"],

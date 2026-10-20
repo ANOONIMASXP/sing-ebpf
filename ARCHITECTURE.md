@@ -25,8 +25,8 @@ interpreting their own configuration and route rules.
 | Path | Root package owns | `runtime` owns | Consumer owns |
 | --- | --- | --- | --- |
 | local cgroup | object selection, token/original maps, redirect routes, cgroup links, release cleanup | none | listeners, accepted TCP metadata, UDP NAT/session state, UID/package policy |
-| local TC | programs/maps, policy compiler, listeners, assignments, cookie self-bypass | default-interface attachment, delivery veth, policy routing, sysctls, reconciliation | listener/session handling, process metadata, interface events, diagnostics presentation |
-| shared socket assignment | programs/maps, assignments, source policy | downstream attachment, policy routing, reconciliation | listeners, shared-source metadata, TCP/UDP handling |
+| local socket assignment | programs/maps, scoped policy, assignment/return state, cookie self-bypass | default-interface attachment, private-netns delivery veth and routing, reconciliation | namespace lifetime, listeners/sessions, process metadata, interface events, diagnostics |
+| shared socket assignment | programs/maps, assignments, return routes, source policy | downstream attachment, isolated delivery veth, private policy routing, reconciliation | namespace lifetime, listeners, shared-source metadata, TCP/UDP handling |
 | shared packet rewrite | rewrite programs/maps, flow lookup/update and counters | downstream attachment, `route_localnet`, health and rollback | token listeners, userspace flow lifecycle, policy translation, warning presentation |
 
 The consumer may combine one local and one shared choice per runtime, and may
@@ -37,10 +37,9 @@ route-rule objects, package names, or a consumer's API schema.
 
 Force-intercept prefixes are deliberately generic. They allow a consumer to
 give selected destinations precedence over ordinary bypass policy without the
-library learning why those prefixes are special. Each control holds two prefix
-slots per address family, so a FakeIP range and one other range of the same
-family can both be intercepted; the consumer marks which prefix the ICMP echo
-responder answers.
+library learning why those prefixes are special. A consumer intercepting a
+FakeIP range beside another range of the same family marks with
+`CIDRDecision.EchoReply` the prefixes the ICMP echo responder answers.
 
 ## Atomic ownership units
 
@@ -58,6 +57,7 @@ Each directory under `runtime/` remains part of a complete resource owner:
 - `runtime/tc_reconcile.go`
 - `runtime/tc_netlink.go`
 - `runtime/tc_delivery.go`
+- `runtime/tc_namespace.go` and `runtime/tc_isolated_delivery.go`
 - `runtime/tc_routing.go`
 - `runtime/tc_topology.go`
 - their unit and network-namespace tests
@@ -68,6 +68,23 @@ rollback, and the `TCBackend`. Raw links, filters, qdiscs, routes, sysctl
 records, BPF maps, programs, and file descriptors remain under
 `internal/core`. The separate `runtime` package can borrow backend handles only
 through the module's internal bridge; consumers cannot access or close them.
+
+For isolated delivery, `TCNamespace` is a separate caller-owned lifetime:
+create it before TCP/UDP listeners, pass it to the runtime, then close it after
+the runtime and all listener/reply sockets. It owns an anonymous namespace FD,
+not a named mount or holder process. The runtime owns a cross-namespace veth;
+its routes/rules and delivery sysctls are confined to that namespace. Host
+interface attachment and outbound dialing remain outside it.
+
+`native/tc_isolation.h` preserves IP/port tuples and records a separate return
+route. `internal/core/tc_return.go` owns opaque generation handles and consumer
+references. TCP accept may consume assignment metadata without removing its
+return route. UDP sessions retain primary and reply-alias handles. The bounded
+HASH rejects admission when full, and the shared maintenance entry point skips
+live references while reclaiming idle orphan/closed routes. Releasing the last
+reference does not immediately remove the record: FIN/ACK and in-flight replies
+retain the activity grace. Failed publication, conflicting publishers and
+missing replies have separate native counters.
 
 ### Shared packet-rewrite runtime
 
@@ -159,9 +176,10 @@ backend that finds a lock holder of its cgroup in another namespace reclaims no
 slot's programs. Slot 0 keeps the names of single-instance builds, which locked
 it exclusively.
 
-Settings that several runtimes depend on at once, `conf.all.rp_filter` and
-`route_localnet`, are reference counted with enumerable leases that carry the
-value to restore; only the last holder restores it. Short critical sections
+A setting that several runtimes depend on at once, a shared packet-rewrite
+interface's `route_localnet`, is reference counted with enumerable leases that
+carry the value to restore; only the last holder restores it. Socket assignment
+changes no host-wide setting: its sysctls live in its private namespace. Short critical sections
 that read and then claim shared state, such as policy-routing identifier
 selection and lease bookkeeping, take an instance mutex. TCX programs carry
 their runtime's priority in a bound marker map and are inserted in priority
@@ -206,3 +224,24 @@ and force-intercept ICMP Echo Reply paths.
 Verify consumer builds with `with_ebpf` both enabled and disabled and generated
 objects for little- and big-endian targets. `boundary_test.go` must continue to
 reject every sing-box or sing-tun import anywhere in the source and test tree.
+
+## Maintenance and diagnostics
+
+Shared rewrite and TC assignment/return jobs use one bounded scheduling model,
+with independent cursors, deadlines and pressure state. Activity coalesces;
+partial scans continue shortly, failures back off, and a minute watchdog
+observes kernel-only allocations. Complete scans are required to clear pressure.
+Each map receives at most the per-pass budget, including batch lookups.
+Batch fallback resets traversal accounting; purge and orphan scans use separate
+cursors.
+
+Return-map enumeration does not hold the reference mutex. Deletion locks one
+candidate and rechecks references, generation and activity. This is a userspace
+recheck, not atomic compare-and-delete against a concurrent kernel writer.
+Return handles pin live consumers. One-second activity hints have a minimum
+two-second cleanup grace.
+
+`RuntimeResources` snapshots resource IDs from owners.
+`InspectRuntimeResources` reads only those IDs and reports shutdown races
+as unavailable, not empty. Global name inspection is a standalone debugging
+tool, never proof of inbound ownership. IDs are metadata, not closeable handles.

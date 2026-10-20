@@ -6,8 +6,6 @@
 
 #include <linux/types.h>
 
-#include "force_intercept_slot.h"
-
 #define SB_EBPF_ORIGINAL_DST_FLAG_CONNECTED_UDP 1U
 
 #define SB_EBPF_PROTO_TCP 6U
@@ -19,9 +17,6 @@
 #define SB_EBPF_SOCKET_METADATA_POLICY_BYPASS (1U << 1U)
 #define SB_EBPF_SOCKET_METADATA_POLICY_INTERCEPT (1U << 2U)
 
-#define SB_EBPF_DNS_MODE_HIJACK 0U
-#define SB_EBPF_DNS_MODE_RESPECT_POLICY 1U
-#define SB_EBPF_DNS_MODE_OFF 2U
 
 #define SB_EBPF_CGROUP_FLAG_TCP (1U << 0U)
 #define SB_EBPF_CGROUP_FLAG_UDP (1U << 1U)
@@ -32,15 +27,12 @@
 #define SB_EBPF_CGROUP_FLAG_BYPASS_IPV4 (1U << 7U)
 #define SB_EBPF_CGROUP_FLAG_BYPASS_IPV6 (1U << 8U)
 #define SB_EBPF_CGROUP_FLAG_UDP_FLOW (1U << 10U)
-#define SB_EBPF_CGROUP_FLAG_BYPASS_PRIVATE_ADDRESS (1U << 11U)
 #define SB_EBPF_CGROUP_FLAG_HOST_IPV4 (1U << 13U)
 #define SB_EBPF_CGROUP_FLAG_HOST_IPV6 (1U << 14U)
 #define SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV4 (1U << 15U)
 #define SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV6 (1U << 16U)
 #define SB_EBPF_CGROUP_FLAG_BYPASS_PORT (1U << 17U)
 #define SB_EBPF_CGROUP_FLAG_UDP_RELEASE_NOTIFY (1U << 18U)
-#define SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_SLOT1_IPV4 (1U << 19U)
-#define SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_SLOT1_IPV6 (1U << 20U)
 struct sb_ebpf_cgroup_control {
     __u32 flags;
     __u32 network_generation;
@@ -48,14 +40,11 @@ struct sb_ebpf_cgroup_control {
     __u32 redirect_ipv4_prefix;
     __u32 redirect_ipv4_host_mask;
     __u16 listener_port;
-    __u16 dns_mode;
+    __u16 reserved_policy;
     __u8 redirect_ipv6_prefix[8];
-    struct sb_ebpf_force_intercept_slot force_intercept[SB_EBPF_FORCE_INTERCEPT_SLOTS];
 };
 
-_Static_assert(sizeof(struct sb_ebpf_cgroup_control) == 112U, "unexpected cgroup control ABI");
-_Static_assert(__builtin_offsetof(struct sb_ebpf_cgroup_control, force_intercept) == 32U,
-    "unexpected cgroup force-intercept ABI");
+_Static_assert(sizeof(struct sb_ebpf_cgroup_control) == 32U, "unexpected cgroup control ABI");
 _Static_assert(__builtin_offsetof(struct sb_ebpf_cgroup_control, network_generation) == 4U,
     "unexpected cgroup network generation ABI");
 

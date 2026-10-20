@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 
 	commonEBPF "github.com/MiChongs/sing-ebpf"
-	core "github.com/MiChongs/sing-ebpf/internal/core"
 	CiliumEBPF "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/sagernet/netlink"
@@ -105,28 +104,24 @@ type tcInterfaceAttachment struct {
 }
 
 type tcDeliveryLink struct {
+	namespace    *TCNamespace
+	returnFilter *netlink.BpfFilter
+	enableIPv6   bool
+	replyMTU     int
 	redirectName string
 	deliveryName string
 	redirect     netlink.Link
 	delivery     netlink.Link
 	filter       *netlink.BpfFilter
-	// deliveryMAC is the delivery interface address programmed into the
-	// backend as every redirected frame's destination.
-	deliveryMAC   commonEBPF.MACAddress
-	sysctls       []tcSysctlState
-	globalSysctls []tcSysctlState
-	// globalLease is this runtime's claim on the lowered conf.all.rp_filter,
-	// which other runtimes in the network namespace may share.
-	globalLease *core.InstanceLease
-}
-
-type tcSysctlState struct {
-	path     string
-	original string
-	applied  string
+	// deliveryMAC is the private end's address programmed into the backend
+	// as every redirected frame's destination.
+	deliveryMAC commonEBPF.MACAddress
 }
 
 type tcDataPlane struct {
+	namespace             *TCNamespace
+	enableIPv6            bool
+	replyMTU              int
 	access                sync.Mutex
 	backend               *commonEBPF.TCBackend
 	routing               *tcPolicyRouting
@@ -207,15 +202,17 @@ func (d *tcDataPlane) attachInterface(
 
 func startTCDataPlane(
 	backend *commonEBPF.TCBackend,
-	localEnabled bool,
 	enableIPv6 bool,
 	localInterface string,
 	sharedInterfaces []string,
 	hostAddresses []netip.Addr,
 	sharedSourceMACPolicy bool,
 	priority uint16,
+	namespace *TCNamespace,
 ) (*tcDataPlane, error) {
 	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
+	dataPlane.namespace = namespace
+	dataPlane.enableIPv6 = enableIPv6
 	cleanup := func(startErr error) (*tcDataPlane, error) {
 		closeErr := dataPlane.Close()
 		if !dataPlane.IsClosed() {
@@ -223,16 +220,29 @@ func startTCDataPlane(
 		}
 		return nil, E.Errors(startErr, closeErr)
 	}
-	routing, err := startTCPolicyRouting(enableIPv6)
-	dataPlane.routing = routing
+	if namespace == nil {
+		return cleanup(E.New("socket assignment requires a private listener namespace"))
+	}
+	if dataPlane.namespace != nil {
+		var err error
+		dataPlane.replyMTU, err = dataPlane.isolatedReplyMTU(localInterface, sharedInterfaces)
+		if err != nil {
+			return cleanup(err)
+		}
+	}
+	err := dataPlane.inNamespace(func() error {
+		var err error
+		dataPlane.routing, err = startTCPolicyRouting(enableIPv6)
+		return err
+	})
 	if err != nil {
 		return cleanup(err)
 	}
-	if err = backend.SetRoutingMark(routing.mark); err != nil {
+	if err = backend.SetRoutingMark(dataPlane.routing.mark); err != nil {
 		return cleanup(E.Cause(err, "set TC eBPF routing mark"))
 	}
-	if localEnabled {
-		delivery, err := dataPlane.createTCDeliveryLink()
+	{
+		delivery, err := dataPlane.createIsolatedTCDeliveryLink()
 		dataPlane.delivery = delivery
 		if err != nil {
 			return cleanup(err)
@@ -1080,7 +1090,7 @@ func (d *tcDataPlane) Close() error {
 	if len(d.attachments) != 0 || len(d.retiredAttachments) != 0 {
 		return closeErr
 	}
-	closeErr = E.Errors(closeErr, d.routing.Close())
+	closeErr = E.Errors(closeErr, d.inNamespace(d.routing.Close))
 	if d.routing.IsClosed() {
 		d.routing = nil
 	}

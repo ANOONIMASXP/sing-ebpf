@@ -4,198 +4,160 @@ package core
 
 import (
 	"net/netip"
+	"slices"
 
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-// CompiledPolicy is an immutable policy snapshot shared by all eBPF data
-// planes created for one consumer. The force-intercept prefixes are opaque
-// application-supplied destination prefixes: the library neither assigns
-// their meaning nor resolves addresses within them.
+// CompiledPolicy is an immutable, independently scoped match/action snapshot.
+// Destination interception precedes port actions, selectors, and bypass CIDRs.
+// The library does not infer any application's DNS or routing semantics.
 type CompiledPolicy struct {
 	uidEntries              []uidLPMKey
 	uidDefaultBypass        bool
-	localDNSMode            DNSMode
-	sharedDNSMode           DNSMode
-	sharedBypassPrivate     bool
-	forceIntercept          forceInterceptPolicy
+	sharedDefaultBypass     bool
+	localForce              dualStackCIDRPrefixes
+	sharedForce             dualStackCIDRPrefixes
+	localEchoReply          dualStackCIDRPrefixes
+	sharedEchoReply         dualStackCIDRPrefixes
 	includeSource           dualStackCIDRPrefixes
 	excludeSource           dualStackCIDRPrefixes
 	includeSourceMAC        []MACAddress
 	excludeSourceMAC        []MACAddress
-	localBypassPortEntries  []tcPortKey
-	sharedBypassPortEntries []tcPortKey
+	localBypassPortEntries  []compiledPortDecision
+	sharedBypassPortEntries []compiledPortDecision
 	localInitialBypass      dualStackCIDRPrefixes
 	sharedInitialBypass     dualStackCIDRPrefixes
 }
 
-// CompileActionPolicy translates the caller's final pass/intercept rules into
-// the internal map layout. The translation intentionally contains no
-// sing-box concepts: a pass action becomes a bypass map entry and an
-// intercept action becomes an include/force entry where the selected data
-// plane supports it.
+type compiledPortDecision struct {
+	key    tcPortKey
+	action uint8
+}
+
+const (
+	portActionPass           uint8 = 1
+	portActionIntercept      uint8 = 2
+	portActionAfterSelectors uint8 = 4
+)
+
 func CompileActionPolicy(config ActionPolicy) (CompiledPolicy, error) {
-	if err := validateActionScope(config.Local, "local"); err != nil {
-		return CompiledPolicy{}, err
+	if len(config.Local.SourceCIDR)+len(config.Local.SourceMAC) != 0 || len(config.Shared.UID) != 0 {
+		return CompiledPolicy{}, E.New("unsupported eBPF policy selector scope")
 	}
-	if err := validateActionScope(config.Shared, "shared"); err != nil {
-		return CompiledPolicy{}, err
-	}
-	var force forceInterceptBuilder
-	local, localBypass, err := compileActionScope(config.Local, "local", &force)
+	local, err := compileActionScope(config.Local, "local")
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
-	shared, sharedBypass, err := compileActionScope(config.Shared, "shared", &force)
-	if err != nil {
-		return CompiledPolicy{}, err
-	}
-	forceIntercept, err := force.build()
+	shared, err := compileActionScope(config.Shared, "shared")
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
 	return CompiledPolicy{
-		uidEntries:              local.uidEntries,
-		uidDefaultBypass:        local.uidDefaultBypass,
-		localDNSMode:            actionDNSMode(config.Local),
-		includeSource:           shared.includeSource,
-		excludeSource:           shared.excludeSource,
-		includeSourceMAC:        shared.includeSourceMAC,
-		excludeSourceMAC:        shared.excludeSourceMAC,
-		localBypassPortEntries:  local.localBypassPortEntries,
-		sharedBypassPortEntries: shared.sharedBypassPortEntries,
-		forceIntercept:          forceIntercept,
-		localInitialBypass:      localBypass,
-		sharedInitialBypass:     sharedBypass,
-		sharedDNSMode:           actionDNSMode(config.Shared),
-		sharedBypassPrivate:     false,
+		uidEntries: local.uidEntries, uidDefaultBypass: local.uidDefaultBypass,
+		sharedDefaultBypass: config.Shared.Default == DecisionPass,
+		localForce:          local.force, sharedForce: shared.force,
+		localEchoReply: local.echoReply, sharedEchoReply: shared.echoReply,
+		includeSource: shared.includeSource, excludeSource: shared.excludeSource,
+		includeSourceMAC: shared.includeSourceMAC, excludeSourceMAC: shared.excludeSourceMAC,
+		localBypassPortEntries: local.ports, sharedBypassPortEntries: shared.ports,
+		localInitialBypass: local.bypass, sharedInitialBypass: shared.bypass,
 	}, nil
 }
 
 type compiledActionScope struct {
-	uidEntries              []uidLPMKey
-	uidDefaultBypass        bool
-	includeSource           dualStackCIDRPrefixes
-	excludeSource           dualStackCIDRPrefixes
-	includeSourceMAC        []MACAddress
-	excludeSourceMAC        []MACAddress
-	localBypassPortEntries  []tcPortKey
-	sharedBypassPortEntries []tcPortKey
+	uidEntries                         []uidLPMKey
+	uidDefaultBypass                   bool
+	includeSource, excludeSource       dualStackCIDRPrefixes
+	includeSourceMAC, excludeSourceMAC []MACAddress
+	force, bypass, echoReply           dualStackCIDRPrefixes
+	ports                              []compiledPortDecision
 }
 
-func actionDNSMode(scope ActionScope) DNSMode {
-	for _, rule := range scope.DestinationPort {
-		if rule.Port == 53 && rule.Action == DecisionIntercept {
-			return DNSModeHijack
-		}
-	}
-	for _, rule := range scope.DestinationPort {
-		if rule.Port == 53 && rule.Action == DecisionPass {
-			return DNSModeOff
-		}
-	}
-	return DNSModeRespectPolicy
-}
-
-func validateActionScope(scope ActionScope, name string) error {
+func compileActionScope(scope ActionScope, name string) (compiledActionScope, error) {
+	result := compiledActionScope{}
 	if !scope.Default.Valid() {
-		return E.New("invalid ", name, " eBPF default decision: ", scope.Default)
+		return result, E.New("invalid ", name, " default decision")
 	}
-	for _, rule := range scope.UID {
-		if rule.Start > rule.End || !rule.Action.Valid() {
-			return E.New("invalid ", name, " UID decision")
+	var err error
+	result.uidEntries, result.uidDefaultBypass, err = compileUIDActionPolicy(scope.UID, scope.Default)
+	if err != nil {
+		return result, E.Cause(err, name, " UID policy")
+	}
+	compilePrefixes := func(rules []CIDRDecision, action Decision, echoReplyOnly bool) (dualStackCIDRPrefixes, error) {
+		var prefixes []netip.Prefix
+		for _, rule := range rules {
+			if !rule.Prefix.IsValid() || !rule.Action.Valid() {
+				return dualStackCIDRPrefixes{}, E.New("invalid ", name, " CIDR decision")
+			}
+			if rule.Action == action && (!echoReplyOnly || rule.EchoReply) {
+				prefixes = append(prefixes, rule.Prefix)
+			}
 		}
+		ipv4, ipv6, err := compileCIDRPrefixes(prefixes)
+		if len(ipv4) > maxDestinationCIDRPolicyEntries || len(ipv6) > maxDestinationCIDRPolicyEntries {
+			return dualStackCIDRPrefixes{}, E.New(name, " CIDR policy exceeds map capacity")
+		}
+		return dualStackCIDRPrefixes{ipv4, ipv6}, err
+	}
+	if result.includeSource, err = compilePrefixes(scope.SourceCIDR, DecisionIntercept, false); err != nil {
+		return result, err
+	}
+	if result.excludeSource, err = compilePrefixes(scope.SourceCIDR, DecisionPass, false); err != nil {
+		return result, err
+	}
+	if result.force, err = compilePrefixes(scope.DestinationCIDR, DecisionIntercept, false); err != nil {
+		return result, err
+	}
+	if result.bypass, err = compilePrefixes(scope.DestinationCIDR, DecisionPass, false); err != nil {
+		return result, err
 	}
 	for _, rule := range scope.SourceCIDR {
-		if !rule.Prefix.IsValid() || !rule.Action.Valid() || rule.EchoReply {
-			return E.New("invalid ", name, " source CIDR decision")
+		if rule.EchoReply {
+			return result, E.New("invalid ", name, " source CIDR decision: echo reply applies to destinations")
 		}
 	}
 	for _, rule := range scope.DestinationCIDR {
-		if !rule.Prefix.IsValid() || !rule.Action.Valid() || rule.EchoReply && rule.Action != DecisionIntercept {
-			return E.New("invalid ", name, " destination CIDR decision")
+		if rule.EchoReply && rule.Action != DecisionIntercept {
+			return result, E.New("invalid ", name, " destination CIDR decision: echo reply requires intercept")
 		}
+	}
+	if result.echoReply, err = compilePrefixes(scope.DestinationCIDR, DecisionIntercept, true); err != nil {
+		return result, err
 	}
 	for _, rule := range scope.SourceMAC {
 		if !rule.Action.Valid() {
-			return E.New("invalid ", name, " source MAC decision")
+			return result, E.New("invalid ", name, " source MAC decision")
 		}
-	}
-	for _, rule := range scope.DestinationPort {
-		if rule.Port == 0 || !rule.Action.Valid() {
-			return E.New("invalid ", name, " destination port decision")
-		}
-	}
-	return nil
-}
-
-func compileActionScope(scope ActionScope, name string, force *forceInterceptBuilder) (compiledActionScope, dualStackCIDRPrefixes, error) {
-	result := compiledActionScope{}
-	var err error
-	var bypass dualStackCIDRPrefixes
-	result.uidEntries, result.uidDefaultBypass, err = compileUIDActionPolicy(scope.UID, scope.Default)
-	if err != nil {
-		return compiledActionScope{}, dualStackCIDRPrefixes{}, E.Cause(err, name, " UID policy")
-	}
-	var sourceInclude, sourceExclude []netip.Prefix
-	for _, rule := range scope.SourceCIDR {
-		if rule.Action == DecisionPass {
-			sourceExclude = append(sourceExclude, rule.Prefix)
-		} else {
-			sourceInclude = append(sourceInclude, rule.Prefix)
-		}
-	}
-	result.includeSource.ipv4, result.includeSource.ipv6, err = compileCIDRPrefixes(sourceInclude)
-	if err != nil {
-		return compiledActionScope{}, dualStackCIDRPrefixes{}, E.Cause(err, name, " include source CIDR policy")
-	}
-	result.excludeSource.ipv4, result.excludeSource.ipv6, err = compileCIDRPrefixes(sourceExclude)
-	if err != nil {
-		return compiledActionScope{}, dualStackCIDRPrefixes{}, E.Cause(err, name, " exclude source CIDR policy")
-	}
-	for _, rule := range scope.SourceMAC {
 		if rule.Action == DecisionPass {
 			result.excludeSourceMAC = append(result.excludeSourceMAC, rule.Address)
 		} else {
 			result.includeSourceMAC = append(result.includeSourceMAC, rule.Address)
 		}
 	}
-	for _, rule := range scope.DestinationCIDR {
-		prefix := rule.Prefix.Masked()
-		if rule.Action == DecisionPass {
-			if prefix.Addr().Is4() {
-				bypass.ipv4 = append(bypass.ipv4, prefix)
-			} else {
-				bypass.ipv6 = append(bypass.ipv6, prefix)
-			}
-			continue
-		}
-		if err = force.add(rule); err != nil {
-			return compiledActionScope{}, dualStackCIDRPrefixes{}, E.Cause(err, name, " destination CIDR policy")
-		}
-	}
+	ports := make(map[tcPortKey]uint8)
 	for _, rule := range scope.DestinationPort {
-		if rule.Action != DecisionPass {
-			// DNS hijack is a control-plane mode, not a normal destination-port
-			// exception. It intentionally remains global even when a UID policy
-			// makes ordinary traffic default to pass, so include_package can be
-			// combined with dns_mode=hijack without silently degrading hijack.
-			if scope.Default == DecisionPass && !isDNSHijackPort(rule) {
-				return compiledActionScope{}, dualStackCIDRPrefixes{}, E.New(name, " cannot override a pass default with port intercept")
-			}
-			continue
+		if rule.Port == 0 || !rule.Action.Valid() || (rule.Protocol != ProtocolTCP && rule.Protocol != ProtocolUDP) {
+			return result, E.New("invalid ", name, " destination port decision")
 		}
-		entry := tcPortKey{Protocol: rule.Protocol, Port: rule.Port}
-		if name == "shared" {
-			result.sharedBypassPortEntries = append(result.sharedBypassPortEntries, entry)
-		} else {
-			result.localBypassPortEntries = append(result.localBypassPortEntries, entry)
+		key := tcPortKey{Protocol: rule.Protocol, Port: rule.Port}
+		action := uint8(rule.Action) + 1
+		if rule.AfterSelectors {
+			action |= portActionAfterSelectors
 		}
+		if previous, exists := ports[key]; exists && previous != action {
+			return result, E.New("conflicting ", name, " port decisions")
+		}
+		ports[key] = action
 	}
-	return result, bypass, nil
-}
-
-func isDNSHijackPort(rule PortDecision) bool {
-	return rule.Action == DecisionIntercept && rule.Port == 53 &&
-		(rule.Protocol == ProtocolTCP || rule.Protocol == ProtocolUDP)
+	for key, action := range ports {
+		result.ports = append(result.ports, compiledPortDecision{key, action})
+	}
+	slices.SortFunc(result.ports, func(a, b compiledPortDecision) int {
+		if a.key.Protocol != b.key.Protocol {
+			return int(a.key.Protocol) - int(b.key.Protocol)
+		}
+		return int(a.key.Port) - int(b.key.Port)
+	})
+	return result, nil
 }

@@ -22,7 +22,6 @@ const (
 type KernelProbeDataPlane string
 
 const (
-	KernelProbeDataPlaneTC            KernelProbeDataPlane = "tc"
 	KernelProbeDataPlaneCgroup        KernelProbeDataPlane = "cgroup"
 	KernelProbeDataPlaneSocketAssign  KernelProbeDataPlane = "socket_assign"
 	KernelProbeDataPlanePacketRewrite KernelProbeDataPlane = "packet_rewrite"
@@ -90,7 +89,7 @@ func newKernelProbePlan(
 	options KernelProbeOptions,
 ) kernelProbePlan {
 	return kernelProbePlan{
-		localTC:             localPlane == KernelProbeDataPlaneTC,
+		localTC:             localPlane == KernelProbeDataPlaneSocketAssign,
 		localCgroup:         localPlane == KernelProbeDataPlaneCgroup,
 		sharedSocketAssign:  sharedPlane == KernelProbeDataPlaneSocketAssign,
 		sharedPacketRewrite: sharedPlane == KernelProbeDataPlanePacketRewrite,
@@ -280,7 +279,7 @@ func normalizeProbeDataPlanes(options KernelProbeOptions) (KernelProbeDataPlane,
 		}
 	}
 	switch local {
-	case "", KernelProbeDataPlaneTC, KernelProbeDataPlaneCgroup:
+	case "", KernelProbeDataPlaneSocketAssign, KernelProbeDataPlaneCgroup:
 	default:
 		return "", "", fmt.Errorf("invalid eBPF local data plane: %s", local)
 	}

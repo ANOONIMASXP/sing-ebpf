@@ -7,7 +7,6 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -23,6 +22,7 @@ const (
 	tcProgramSharedIngressEthernet
 	tcProgramSharedIngressRawIP
 	tcProgramDeliveryIngress
+	tcProgramIsolatedReturn
 	tcProgramCount
 )
 
@@ -41,6 +41,9 @@ const (
 	tcStatAssignmentUpdateFailure
 	tcStatLocalFragmentPass
 	tcStatSharedFragmentPass
+	tcStatReturnUpdateFailure
+	tcStatReturnConflict
+	tcStatReturnLookupFailure
 	tcStatCount
 )
 
@@ -53,6 +56,9 @@ type TCStats struct {
 	AssignmentUpdateFailures uint64
 	LocalFragmentPasses      uint64
 	SharedFragmentPasses     uint64
+	ReturnUpdateFailures     uint64
+	ReturnConflicts          uint64
+	ReturnLookupFailures     uint64
 }
 
 // DefaultTCRoutingMark is used only by standalone backend tests and callers
@@ -76,16 +82,8 @@ const (
 )
 
 const (
-	tcFlagForceInterceptIPv4      = 1 << 10
-	tcFlagForceInterceptIPv6      = 1 << 11
-	tcFlagForceInterceptSlot1IPv4 = 1 << 24
-	tcFlagForceInterceptSlot1IPv6 = 1 << 25
-)
-
-const (
 	tcListenerTCP4 = iota
 	tcListenerTCP6
-	tcListenerCount
 )
 
 const (
@@ -133,11 +131,9 @@ type tcControl struct {
 	DeliveryInterface uint32
 	RoutingMark       uint32
 	ListenerPort      uint16
-	LocalDNSMode      DNSMode
-	SharedDNSMode     DNSMode
+	ReservedPolicy    [2]uint16
 	DeliveryMAC       MACAddress
 	Reserved          uint16
-	ForceIntercept    [forceInterceptSlots]forceInterceptSlot
 }
 
 type tcAssignKey struct {
@@ -162,14 +158,18 @@ type TCAssignment struct {
 }
 
 // TCAssignmentSweepResult describes one bounded cleanup pass. Entries are
-// removed only when they were observed by userspace, remained unchanged since
-// observation, and exceeded maxIdle. Unobserved kernel entries remain under
-// the LRU safety net because userspace cannot prove their age.
+// removed after their kernel timestamp exceeds maxIdle and an immediate
+// value/generation recheck still matches. The per-map scan budget also applies
+// on batch-capable kernels; Complete covers assignment, return and fragments.
 type TCAssignmentSweepResult struct {
-	Usage    MapUsage
-	Scanned  uint32
-	Removed  uint32
-	Complete bool
+	ReturnUsage      MapUsage
+	ReturnUsageKnown bool
+	ReturnScanned    uint32
+	ReturnRemoved    uint32
+	Usage            MapUsage
+	Scanned          uint32
+	Removed          uint32
+	Complete         bool
 	// UsageKnown is true only after a complete traversal. A bounded partial
 	// traversal must not be interpreted as an empty map by callers.
 	UsageKnown bool
@@ -177,7 +177,8 @@ type TCAssignmentSweepResult struct {
 	// Failure classifies a failed maintenance pass without requiring callers
 	// to parse platform-specific errno text. An empty value means the pass
 	// completed (or is a normal partial traversal).
-	Failure string
+	Failure    string
+	FailureMap string
 }
 
 const (
@@ -202,11 +203,14 @@ type TCBackend struct {
 	health                    backendHealth
 	runtime                   *tcRuntime
 	tcpListenerMap            bool
+	programsExposed           bool
 	control                   tcControl
 	controlMapFD              int
 	assignmentMapFD           int
 	assignmentCapacity        uint32
 	assignmentSweepAccess     sync.Mutex
+	assignmentSweepRemoved    uint32
+	returnSweepRemoved        uint32
 	assignmentSweepScratch    mapScanScratch[tcAssignKey, TCAssignment]
 	assignmentSweepCandidates []tcAssignmentSweepEntry
 	selfMapExternal           bool
@@ -220,10 +224,11 @@ type TCBackend struct {
 	// tc_icmp_echo_reply.go. It is a standalone backend (ICMPEchoReplyBackend) rather
 	// than fields inline here because shared.data_plane: packet_rewrite hosts
 	// the same native object with no TCBackend of its own to hold it in.
-	icmpEchoReply *ICMPEchoReplyBackend
-	// tcpListenerModes records, per listener family, whether the registered
-	// listener is in the SOCKMAP or is found by port because it is MPTCP.
-	tcpListenerModes [tcListenerCount]atomic.Uint32
+	icmpEchoReply              *ICMPEchoReplyBackend
+	returnAccess               sync.Mutex
+	returnReferences           map[tcReturnReference]uint32
+	returnSweepScratch         mapScanScratch[tcAssignKey, tcReturnValue]
+	returnFragmentSweepScratch mapScanScratch[tcAssignKey, tcReturnValue]
 }
 
 func PrepareTC(config TCConfig) (*TCBackend, error) {
@@ -284,6 +289,8 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		"tc_local_bypass_port":   {name: "sb_tc_lport", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.localBypassPortEntries)), 1), flags: bpfFlagNoPrealloc},
 		"tc_shared_bypass_port":  {name: "sb_tc_sport", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.sharedBypassPortEntries)), 1), flags: bpfFlagNoPrealloc},
 	}
+	addForceMapOverrides(mapOverrides, "tc_local", "sb_tc_lforce", policy.localForce)
+	addForceMapOverrides(mapOverrides, "tc_shared", "sb_tc_sforce", policy.sharedForce)
 	if config.EnableLocal {
 		selfMapCapacity := uint32(selfBypassSocketCapacity)
 		if config.SelfBypassMap != nil {
@@ -296,6 +303,8 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		}
 	}
 	legacyTCP := forceLegacyTCP || !config.EnableTCP
+	mapOverrides["tc_return"] = mapSpecOverride{name: "sb_tc_return", mapType: CiliumEBPF.Hash, maxEntries: config.AssignmentCapacity}
+	mapOverrides["tc_return_frag"] = mapSpecOverride{name: "sb_tc_rfrag", mapType: CiliumEBPF.LRUHash, maxEntries: min(config.AssignmentCapacity, 1024)}
 	maps, loadedPrograms, err := loadTCResources(config, mapOverrides, legacyTCP)
 	if err != nil && config.EnableTCP && !forceLegacyTCP {
 		legacyTCP = true
@@ -309,9 +318,6 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		DeliveryInterface: config.DeliveryInterface,
 		RoutingMark:       config.RoutingMark,
 		ListenerPort:      config.ListenerPort,
-		LocalDNSMode:      policy.localDNSMode,
-		SharedDNSMode:     policy.sharedDNSMode,
-		ForceIntercept:    policy.forceIntercept.controlSlots(),
 	}
 	if len(includeIPv4)+len(includeIPv6) > 0 {
 		controlValue.Flags |= 1 << 12
@@ -356,7 +362,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		return nil, E.Errors(err, backend.Close())
 	}
 	if err = populateCompiledPolicyMaps(policyMapTargets{
-		Scope:             "TC eBPF",
+		Scope:          "TC eBPF",
+		LocalForceIPv4: maps["tc_local_force4"], LocalForceIPv6: maps["tc_local_force6"],
+		SharedForceIPv4: maps["tc_shared_force4"], SharedForceIPv6: maps["tc_shared_force6"],
 		UID:               maps["tc_uid_policy"],
 		LocalPort:         maps["tc_local_bypass_port"],
 		SharedPort:        maps["tc_shared_bypass_port"],
@@ -375,8 +383,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	}
 	if config.ICMPEchoReply {
 		backend.icmpEchoReply, err = PrepareICMPEchoReply(
-			config.EnableIPv4, config.EnableLocalIPv6, config.EnableSharedIPv6,
-			policy.forceIntercept.echoReplyIPv4, policy.forceIntercept.echoReplyIPv6,
+			config.EnableIPv4, config.EnableLocalIPv6, config.EnableSharedIPv6, policy,
 		)
 		if err != nil {
 			return nil, E.Errors(err, backend.Close())
@@ -406,44 +413,26 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride, 
 	selections := make([]programSelection, 0, tcProgramCount)
 	programIndexes := make([]int, 0, tcProgramCount)
 	if config.EnableLocal {
-		localEthernetSection := "classifier/local_egress_ethernet_mark"
-		localRawIPSection := "classifier/local_egress_raw_ip_mark"
+		ethernet, rawIP := "classifier/local_egress_ethernet_isolated", "classifier/local_egress_raw_ip_isolated"
 		if config.TrackProcess {
-			localEthernetSection = "classifier/local_egress_ethernet_process"
-			localRawIPSection = "classifier/local_egress_raw_ip_process"
+			ethernet += "_process"
+			rawIP += "_process"
 		}
-		selections = append(selections,
-			programSelection{section: localEthernetSection, kernelProgramName: kernelProgramNameTCLocalEthernet},
-			programSelection{section: localRawIPSection, kernelProgramName: kernelProgramNameTCLocalRawIP},
-		)
+		selections = append(selections, programSelection{section: ethernet, kernelProgramName: kernelProgramNameTCLocalEthernet}, programSelection{section: rawIP, kernelProgramName: kernelProgramNameTCLocalRawIP})
 		programIndexes = append(programIndexes, tcProgramLocalEgressEthernet, tcProgramLocalEgressRawIP)
 	}
 	if config.EnableShared {
-		sharedEthernetSection := "classifier/shared_ingress_ethernet"
-		sharedRawIPSection := "classifier/shared_ingress_raw_ip"
-		if !config.EnableTCP {
-			sharedEthernetSection += "_udp"
-			sharedRawIPSection += "_udp"
-		} else if legacyTCP {
-			sharedEthernetSection += "_legacy"
-			sharedRawIPSection += "_legacy"
-		}
-		selections = append(selections,
-			programSelection{section: sharedEthernetSection, kernelProgramName: kernelProgramNameTCSharedEthernet},
-			programSelection{section: sharedRawIPSection, kernelProgramName: kernelProgramNameTCSharedRawIP},
-		)
+		selections = append(selections, programSelection{section: "classifier/shared_ingress_ethernet_isolated", kernelProgramName: kernelProgramNameTCSharedEthernet}, programSelection{section: "classifier/shared_ingress_raw_ip_isolated", kernelProgramName: kernelProgramNameTCSharedRawIP})
 		programIndexes = append(programIndexes, tcProgramSharedIngressEthernet, tcProgramSharedIngressRawIP)
 	}
-	if config.EnableLocal {
-		deliverySection := "classifier/delivery_ingress"
-		if !config.EnableTCP {
-			deliverySection += "_udp"
-		} else if legacyTCP {
-			deliverySection += "_legacy"
-		}
-		selections = append(selections, programSelection{section: deliverySection, kernelProgramName: kernelProgramNameTCDelivery})
-		programIndexes = append(programIndexes, tcProgramDeliveryIngress)
+	delivery := "classifier/isolated_delivery"
+	if !config.EnableTCP {
+		delivery += "_udp"
+	} else if legacyTCP {
+		delivery += "_legacy"
 	}
+	selections = append(selections, programSelection{section: delivery, kernelProgramName: kernelProgramNameTCDelivery}, programSelection{section: "classifier/isolated_return", kernelProgramName: "sb_tc_return"})
+	programIndexes = append(programIndexes, tcProgramDeliveryIngress, tcProgramIsolatedReturn)
 	loadedPrograms, err := loadObjectPrograms(loadTC, maps, selections)
 	if err != nil {
 		if externalSelfMap {
@@ -492,12 +481,11 @@ func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
 		EnableSharedIPv6:    config.EnableSharedIPv6,
 		UIDPolicy:           len(policy.uidEntries) > 0 || policy.uidDefaultBypass,
 		UIDDefaultBypass:    policy.uidDefaultBypass,
-		LocalBypassPrivate:  false,
-		SharedBypassPrivate: policy.sharedBypassPrivate,
+		SharedDefaultBypass: policy.sharedDefaultBypass,
 		LocalBypassPort:     len(policy.localBypassPortEntries) > 0,
 		SharedBypassPort:    len(policy.sharedBypassPortEntries) > 0,
-		ForceInterceptIPv4:  policy.forceIntercept.enabledIPv4(),
-		ForceInterceptIPv6:  policy.forceIntercept.enabledIPv6(),
+		ForceInterceptIPv4:  (len(policy.localForce.ipv4)+len(policy.sharedForce.ipv4) > 0),
+		ForceInterceptIPv6:  (len(policy.localForce.ipv6)+len(policy.sharedForce.ipv6) > 0),
 		IncludeSource:       len(policy.includeSource.ipv4)+len(policy.includeSource.ipv6) > 0,
 		ExcludeSource:       len(policy.excludeSource.ipv4)+len(policy.excludeSource.ipv6) > 0,
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,
@@ -606,17 +594,12 @@ func (b *TCBackend) SetDeliveryInterface(interfaceIndex uint32, hardwareAddress 
 	return nil
 }
 
-const (
-	tcListenerUnregistered = iota
-	tcListenerInSockmap
-	tcListenerByPort
-)
-
-// RegisterTCPListener places a plain TCP listener in the SOCKMAP. A SOCKMAP
-// rejects MPTCP sockets, which Go listeners use by default since Go 1.24, so
-// an MPTCP listener is left out of it and the programs find its TCP subflow
-// listener by port instead; that requires a wildcard bind.
+// RegisterTCPListener must precede exposing/attaching any program. An actual
+// listener rejection can select direct lookup even when a synthetic probe or
+// SOCKMAP creation succeeded (socket protocol and namespace both matter).
 func (b *TCBackend) RegisterTCPListener(ipv6 bool, fd int) error {
+	b.access.Lock()
+	defer b.access.Unlock()
 	if !b.tcpListenerMap {
 		return nil
 	}
@@ -628,53 +611,55 @@ func (b *TCBackend) RegisterTCPListener(ipv6 bool, fd int) error {
 		key = tcListenerTCP6
 	}
 	value := uint32(fd)
-	b.access.RLock()
-	defer b.access.RUnlock()
 	if err := b.requireUsableLocked(); err != nil {
 		return err
 	}
-	listenerMapFD := b.runtime.maps["tc_listener_sockets"].FD()
-	if protocol, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_PROTOCOL); err == nil && protocol == unix.IPPROTO_MPTCP {
-		// Deleting an empty SOCKMAP slot reports EINVAL rather than ENOENT.
-		if err = deleteMap(listenerMapFD, unsafe.Pointer(&key)); err != nil &&
-			!errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.EINVAL) {
-			return E.Cause(err, "unregister previous TC eBPF TCP listener")
+	if err := updateMap(b.runtime.maps["tc_listener_sockets"].FD(), unsafe.Pointer(&key), unsafe.Pointer(&value)); err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) && !b.programsExposed && b.control.Enabled == 0 {
+			if fallbackErr := b.useDirectTCPListenersLocked(); fallbackErr == nil {
+				return nil
+			} else {
+				return E.Errors(E.Cause(err, "register TC eBPF TCP listener"), fallbackErr)
+			}
 		}
-		b.tcpListenerModes[key].Store(tcListenerByPort)
-		return nil
-	}
-	if err := updateMap(listenerMapFD, unsafe.Pointer(&key), unsafe.Pointer(&value)); err != nil {
 		return E.Cause(err, "register TC eBPF TCP listener")
 	}
-	b.tcpListenerModes[key].Store(tcListenerInSockmap)
 	return nil
 }
 
-// TCPListenerLookupMode reports "sockmap" or "direct", or "mixed" when one
-// registered listener family is in the SOCKMAP and the other is found by port.
+func (b *TCBackend) useDirectTCPListenersLocked() error {
+	if b.programsExposed || b.control.Enabled != 0 {
+		return E.New("cannot replace exposed TC listener programs")
+	}
+	var selections []programSelection
+	var indexes []int
+	add := func(index int, section, name string) {
+		if b.runtime.programs[index] != nil {
+			indexes = append(indexes, index)
+			selections = append(selections, programSelection{section: section, kernelProgramName: name})
+		}
+	}
+	add(tcProgramDeliveryIngress, "classifier/isolated_delivery_legacy", kernelProgramNameTCDelivery)
+	programs, err := loadObjectPrograms(loadTC, b.runtime.maps, selections)
+	if err != nil {
+		return err
+	}
+	var closeErr error
+	for n, index := range indexes {
+		closeErr = E.Errors(closeErr, b.runtime.programs[index].Close())
+		b.runtime.programs[index] = programs[n]
+	}
+	b.tcpListenerMap = false
+	return closeErr
+}
+
 func (b *TCBackend) TCPListenerLookupMode() string {
 	b.access.RLock()
 	defer b.access.RUnlock()
-	if !b.tcpListenerMap {
-		return "direct"
-	}
-	var inSockmap, byPort bool
-	for index := range b.tcpListenerModes {
-		switch b.tcpListenerModes[index].Load() {
-		case tcListenerInSockmap:
-			inSockmap = true
-		case tcListenerByPort:
-			byPort = true
-		}
-	}
-	switch {
-	case byPort && inSockmap:
-		return "mixed"
-	case byPort:
-		return "direct"
-	default:
+	if b.tcpListenerMap {
 		return "sockmap"
 	}
+	return "direct"
 }
 
 func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.AddrPort, interfaceIndex uint32, remove bool) (TCAssignment, error) {
@@ -703,7 +688,7 @@ func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.A
 // remove a newer session's entry. A missing entry or a value mismatch is a
 // successful no-op; LRU eviction remains the fallback for entries which are
 // not observed by userspace during their lifetime. The match ignores
-// LastSeenNS, which the programs refresh on every packet of the session; see
+// LastSeenNS, which the programs refresh while the session is active; see
 // sameTCAssignment.
 func (b *TCBackend) RemoveAssignmentIfMatch(
 	protocol uint8,
@@ -759,6 +744,9 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	if maxIdle <= 0 || fallbackBudget == 0 {
 		return TCAssignmentSweepResult{}, unix.EINVAL
 	}
+	// Native activity writes are coalesced for one second. Never interpret
+	// that intentionally coarse timestamp as proof that an active flow is idle.
+	maxIdle = max(maxIdle, 2*time.Second)
 	b.assignmentSweepAccess.Lock()
 	defer b.assignmentSweepAccess.Unlock()
 	b.access.RLock()
@@ -766,14 +754,10 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	if b.runtime == nil || b.runtime.maps["tc_assignment"] == nil {
 		return TCAssignmentSweepResult{Failure: TCAssignmentSweepFailureClosed}, errBackendClosed
 	}
-	result := TCAssignmentSweepResult{Usage: MapUsage{Capacity: b.assignmentCapacity}}
+	result := TCAssignmentSweepResult{Usage: MapUsage{Capacity: b.assignmentCapacity}, FailureMap: "sb_tc_assign"}
 	now := monotonicNowNS()
 	maxIdleNS := uint64(maxIdle)
-	if now <= maxIdleNS {
-		result.UsageKnown = true
-		return result, nil
-	}
-	staleBefore := now - maxIdleNS
+	staleBefore := now - min(now, maxIdleNS)
 	b.assignmentSweepCandidates = b.assignmentSweepCandidates[:0]
 	scan, err := b.assignmentSweepScratch.scan(
 		b.runtime.maps["tc_assignment"], b.assignmentCapacity, fallbackBudget,
@@ -788,6 +772,9 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 		return result, err
 	}
 	result.Scanned, result.Complete = scan.Scanned, scan.Complete
+	if scan.Restarted {
+		b.assignmentSweepRemoved = 0
+	}
 	for _, candidate := range b.assignmentSweepCandidates {
 		var current TCAssignment
 		if err = lookupMap(b.assignmentMapFD, unsafe.Pointer(&candidate.key), unsafe.Pointer(&current)); err != nil {
@@ -805,16 +792,19 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 			return result, err
 		}
 		result.Removed++
+		b.assignmentSweepRemoved++
 	}
 	if result.Complete {
-		result.Usage.Entries = scan.Entries
-		if result.Removed >= result.Usage.Entries {
-			result.Usage.Entries = 0
-		} else {
-			result.Usage.Entries -= result.Removed
-		}
+		result.Usage.Entries = scan.Entries - min(scan.Entries, b.assignmentSweepRemoved)
+		b.assignmentSweepRemoved = 0
 		result.UsageKnown = true
 		result.Pressure = uint64(result.Usage.Entries)*100 >= uint64(result.Usage.Capacity)*70
+	}
+	if err = b.sweepReturnRoutesLocked(max(maxIdle, time.Second), fallbackBudget, &result); err != nil {
+		return result, err
+	}
+	if result.Failure == "" {
+		result.FailureMap = ""
 	}
 	return result, nil
 }
@@ -860,6 +850,15 @@ func (b *TCBackend) Stats() (TCStats, error) {
 		return TCStats{}, err
 	}
 	if stats.SharedFragmentPasses, err = read(tcStatSharedFragmentPass); err != nil {
+		return TCStats{}, err
+	}
+	if stats.ReturnUpdateFailures, err = read(tcStatReturnUpdateFailure); err != nil {
+		return TCStats{}, err
+	}
+	if stats.ReturnConflicts, err = read(tcStatReturnConflict); err != nil {
+		return TCStats{}, err
+	}
+	if stats.ReturnLookupFailures, err = read(tcStatReturnLookupFailure); err != nil {
 		return TCStats{}, err
 	}
 	return stats, nil
@@ -1113,16 +1112,18 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
 }
 
 func (b *TCBackend) DeliveryIngressProgramFD() int { return b.programFD(tcProgramDeliveryIngress) }
+func (b *TCBackend) IsolatedReturnProgramFD() int  { return b.programFD(tcProgramIsolatedReturn) }
 
 func (b *TCBackend) programFD(index int) int {
 	if b == nil {
 		return -1
 	}
-	b.access.RLock()
-	defer b.access.RUnlock()
+	b.access.Lock()
+	defer b.access.Unlock()
 	if b.runtime == nil || index < 0 || index >= len(b.runtime.programs) || b.runtime.programs[index] == nil {
 		return -1
 	}
+	b.programsExposed = true
 	return b.runtime.programs[index].FD()
 }
 
@@ -1130,11 +1131,12 @@ func (b *TCBackend) program(index int) *CiliumEBPF.Program {
 	if b == nil {
 		return nil
 	}
-	b.access.RLock()
-	defer b.access.RUnlock()
+	b.access.Lock()
+	defer b.access.Unlock()
 	if b.runtime == nil || index < 0 || index >= len(b.runtime.programs) {
 		return nil
 	}
+	b.programsExposed = true
 	return b.runtime.programs[index]
 }
 
@@ -1160,7 +1162,14 @@ func (b *TCBackend) Close() error {
 	b.assignmentMapFD = -1
 	b.assignmentCapacity = 0
 	b.assignmentSweepCandidates = nil
+	b.assignmentSweepRemoved = 0
+	b.returnSweepRemoved = 0
 	b.assignmentSweepScratch = mapScanScratch[tcAssignKey, TCAssignment]{}
+	b.returnAccess.Lock()
+	b.returnReferences = nil
+	b.returnSweepScratch = mapScanScratch[tcAssignKey, tcReturnValue]{}
+	b.returnFragmentSweepScratch = mapScanScratch[tcAssignKey, tcReturnValue]{}
+	b.returnAccess.Unlock()
 	b.selfMapExternal = false
 	b.bypassIPv4 = nil
 	b.bypassIPv6 = nil

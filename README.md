@@ -77,7 +77,27 @@ instead of maintaining a map-name classification list.
 
 ## Packet paths
 
-The library has four concrete backend choices: local `tc` or `cgroup`, and
+### Independent mechanism selection
+
+`cgroup` and `packet_rewrite` are compatibility-oriented.
+`socket_assign` is experimental and requires more kernel capabilities; it
+preserves TCP **and** UDP tuples in a private namespace. Migrate the old local
+name `tc` to `socket_assign`; it is not an alias.
+
+| Local | Shared | Mechanisms |
+| --- | --- | --- |
+| cgroup | packet_rewrite | Socket-address + Ethernet packet rewrite; no assignment namespace |
+| cgroup | socket_assign | cgroup hooks + independent shared assignment namespace |
+| socket_assign | packet_rewrite | Local assignment namespace + independent shared rewrite |
+| socket_assign | socket_assign | One assignment engine/namespace, independent scope policies |
+
+Either scope can run alone. TCP/UDP selection applies to enabled scopes;
+IPv6 is independent per scope. Disabled paths cannot enable another path's
+IPv6 listener or change its policy. Optional cgroup self-bypass/process
+tracking is not a mandatory dependency of socket assignment. Missing
+capabilities fail startup explicitly; no mechanism silently changes.
+
+The library has three mechanisms and four selectable scope paths: local `socket_assign` or `cgroup`, and
 shared `socket_assign` or `packet_rewrite`. A consumer may enable either path
 independently. Exported capability probes can load and close selected generated
 objects without attaching them, but attachment and network-state validation
@@ -89,17 +109,19 @@ are identified by their kernel socket cookie. An exclusive process cgroup can
 populate and release the cookie map in kernel hooks. When the cgroup is shared
 or cannot be attached, a consumer can register dialer and transparent-reply
 socket cookies once at creation time.
-Selected packets are addressed to the delivery peer, cross the veth, and are assigned at
-its ingress hook. L3-only links receive an Ethernet header before this redirect.
-Both veth ends get explicit locally administered MAC addresses at creation, and
-the runtime waits for udevd to finish processing the new pair before it
-configures it: otherwise systemd's default link policy replaces the delivery
-peer's address after it was programmed as the frames' destination, and the
-kernel drops every redirected frame as `PACKET_OTHERHOST`; systemd-sysctl
-likewise resets the peer's `rp_filter`.
+For isolated socket assignment, selected packets cross a veth into a private
+network namespace and are assigned at its ingress hook. L3-only links receive
+an Ethernet header before this redirect. TCP and UDP keep their original IP
+addresses and ports; this is not packet/token rewriting.
+Both veth ends get explicit locally administered MAC addresses at creation. The
+host end is visible to udevd, and systemd's default link policy would otherwise
+replace its kernel-generated address after the private namespace's static
+neighbor entry was set to it. The runtime remembers the private end's address
+programmed as the redirected frames' destination; the health check reports a
+changed address and the repair reprograms the backend in place.
 
-Shared `socket_assign` traffic is selected and assigned at TC ingress on each
-configured downstream interface. Shared `packet_rewrite` traffic is selected
+Shared `socket_assign` traffic is selected at TC ingress on each configured
+downstream interface and uses the same isolated TCP/UDP delivery. Shared `packet_rewrite` traffic is selected
 and rewritten at ingress, then restored at egress. Local and shared roles can
 be enabled independently, including with local cgroup plus shared
 `packet_rewrite`.
@@ -108,14 +130,44 @@ Local egress and shared `socket_assign` ingress each have Ethernet and raw-IP
 program variants; the selected variant follows the link encapsulation reported
 by netlink. Shared `packet_rewrite` intentionally accepts Ethernet framing
 only because it edits L2 packets in place.
-`classifier/delivery_ingress` always parses Ethernet from the internal veth.
-Local and delivery use the local IPv6 flag; shared uses the shared IPv6 flag.
+Delivery always parses Ethernet from the internal veth. Local and shared
+selection use their own IPv6 flags; isolated delivery accepts either enabled family.
 Both flags are static for the lifetime of the inbound.
+
+Consumers create `runtime.NewTCNamespace` before their transparent listeners,
+use its `Path()` for TCP, UDP and transparent UDP reply sockets, and pass the namespace to `runtime.NewTCRuntime`.
+Outbound dialers stay in the host namespace. Close the runtime and sockets
+before closing the caller-owned namespace. No named namespace, mount point,
+holder process, host NAT rule, or host-wide sysctl change is needed.
+Bind isolated UDP listeners to `127.0.0.1` / `::1`; TCP listeners remain wildcard.
+The UDP lookup uses loopback without changing the received packet's tuple,
+avoiding conflicts when a remote UDP endpoint has the listener's own port.
+A namespace is mandatory for socket assignment; the host-namespace alternative
+and `TCConfig.Isolated` switch have been removed.
+
+The host veth ingress returns replies directly to the recorded original
+interface (ingress for local clients; egress for shared clients), outside host
+NAT. Assignment metadata and return routing have separate lifetimes:
+`sb_tc_assign` is consumable metadata, while `sb_tc_return` is a bounded HASH.
+Only TCP connection setup (SYN) records assignment metadata: the consumer takes
+it once at accept, and established segments refresh only the return route, so
+they neither pay the assignment lookup nor recreate a consumed entry.
+Consumers retain return handles for live TCP/UDP sessions and reply aliases;
+the maintenance worker cleans only unreferenced idle records. Full capacity
+rejects new flows instead of evicting active return paths. Counters distinguish
+publication failure, competing publishers and missing return records.
+
+The private reply route uses the smallest selected interface MTU. Its IP stack
+segments TCP and, when enabled by the consumer, fragments UDP before direct
+return. A bounded `sb_tc_rfrag` LRU cache carries the first fragment's return
+path to subsequent IPv4/IPv6 fragments for at most two seconds; it cannot evict
+live flow routes. The worker reclaims expired fragment records. A cache miss
+drops the fragment and increments the return-lookup failure counter.
 
 Fragmented IPv4 datagrams and non-atomic IPv6 fragments bypass before policy
 selection. IPv6 atomic fragments continue through extension-header parsing.
 
-### Optional local cgroup path
+### Compatibility-oriented local cgroup path
 
 The cgroup backend attaches connect and UDP sendmsg/recvmsg programs to the
 selected cgroup v2 directory. A selected destination is replaced with a token
@@ -197,17 +249,22 @@ and performs direct `bpf_skc_lookup_tcp` lookup. UDP lookup substitutes only the
 internal listener port. `tc_assignment` records the original tuple, ingress
 interface, shared source MAC, packet path, and (for local process matching) the
 socket cookie used to recover the process owner. The separate
-`tc_self_sockets` map contains only cookies of consumer-owned sockets and is
-consulted by local egress before any packet interception.
+`tc_self_sockets` map (shared as `sb_self_sockets`) contains consumer self-bypass
+flags and, when UID policy tracking is enabled, application socket policy flags.
+Local egress checks the self-bypass bit before interception and uses the policy
+bits when evaluating UID decisions. CIDR bypass rules do not populate this map.
 The optional cgroup socket-address tracker records cookie, PID, and UID in a
 bounded LRU map. Userspace then reads only `/proc/<pid>/exe` instead of scanning
 all process file descriptors. The tracker always attaches to the cgroup v2
 root, which is also the default interception cgroup, so it uses only
 multi-program attachment and never leaves a root hook in single-program mode.
 If the tracker cannot be attached, normal route process search remains the
-fallback. A cgroup `sock_release` hook removes owner
-records immediately when supported; otherwise the bounded LRU map remains the
-cleanup fallback. Its capability probe is multi-only and does not displace an
+fallback. The tracker's root-cgroup `sock_release`
+hook removes both owner records and any UID policy metadata for the released
+cookie. The consumer's narrower self-bypass release hook cannot clean up sockets
+created by applications outside its cgroup. When the tracker release hook is
+unavailable, both maps retain bounded LRU fallback, so occupancy can remain high
+after sockets close. Its capability probe is multi-only and does not displace an
 existing cgroup owner.
 Raw-IP shared links mark the source MAC as unavailable rather than publishing a
 synthetic address. Source MAC policy therefore requires Ethernet framing.
@@ -240,15 +297,16 @@ disabled and interface filters are detached.
 
 The programs first apply path-specific address-family, protocol, fragment,
 service-traffic, and safety gates. Application-supplied force-intercept prefixes
-force interception before other policy. A policy may carry two force-intercept
-prefixes per address family, taken from the intercept destination decisions of
-both scopes together; every interception path checks both. ICMP echo reply
-answers only the prefix whose decision sets `EchoReply`, or a family's sole
-prefix when no decision does. DNS `off` bypasses and DNS `hijack`
-intercepts before UID or shared source
-policy. DNS `respect_policy` applies UID/source policy first, then intercepts
-before host, private-address, and destination-CIDR bypass. Other traffic applies
-the same source policy followed by those destination bypasses.
+force interception before other policy. Local and shared force-prefix sets
+are independent and support multiple prefixes per family. ICMP echo reply
+answers, per scope and family, the intercept prefixes whose decisions set
+`CIDRDecision.EchoReply`, or every intercept prefix of the family when no
+decision does; a VPN range intercepted beside a FakeIP range is then not
+answered locally. Port actions run
+before source selectors by default, or after selectors when
+`PortDecision.AfterSelectors` is true; then destination bypass applies.
+Port 53 has no special meaning in native code. Consumers such as sing-box
+compile DNS modes into these generic port actions.
 
 Local egress checks the socket-cookie self-bypass map. Shared source CIDR and
 MAC include/exclude policies are evaluated only on the shared path. If either
@@ -281,15 +339,14 @@ single-instance builds.
   order of runtimes with equal priorities is unspecified; give them distinct
   priorities when it matters. Reading the order needs `CAP_SYS_ADMIN`; without
   it a runtime attaches through clsact instead.
-- **Policy routing.** Every runtime owns its own mark bit, table and rule
-  priority, preferring those of its routing slot so that the next holder of the
-  slot can reclaim what an interrupted runtime left behind.
-- **Shared settings.** `conf.all.rp_filter` and an interface's `route_localnet`
-  are reference counted with leases: a runtime that leaves while another still
+- **Policy routing.** Socket assignment routes inside its private namespace.
+  Every runtime owns its own mark bit, table and rule priority there,
+  preferring those of its routing slot so that the next holder of the slot can
+  reclaim what an interrupted runtime left behind.
+- **Shared settings.** A shared packet-rewrite interface's `route_localnet` is
+  reference counted with leases: a runtime that leaves while another still
   depends on the setting leaves it in place, and the last one restores the
-  original value. Interfaces pinned when the aggregate filter was lowered keep
-  the previous aggregate value if their pinning runtime leaves first, which is
-  the effective filter they had before.
+  original value.
 - **cgroup.** Backends sharing a cgroup hold a shared lock on it and run their
   programs in attach order, descendants' before ancestors'. A later backend
   never redirects a destination an earlier one already redirected: IPv4
@@ -311,8 +368,8 @@ process, and use UID or process-cgroup policy across processes.
 Builds without multi-instance support hold slot 0 of an interface or of policy
 routing exclusively and an exclusive lock on a cgroup, so they never share
 kernel names with this build. They do not take part in shared-setting leases,
-however: do not run one beside this build with local TC or shared
-`packet_rewrite` in the same network namespace.
+however: do not run one beside this build with shared `packet_rewrite` on the
+same interface.
 
 `AttachmentInfo.Slot`, `TCNetworkInfo.RoutingSlot` and
 `CgroupBackend.InstanceSlot` report the slots a runtime holds.
@@ -397,8 +454,9 @@ cleanup path.
 For local cgroup mode, the consumer selects redirect prefixes and supplies
 listeners; the backend prepares routes and maps, loads the enabled program set,
 and attaches it last. Shared `packet_rewrite` uses separate listeners and token
-routes. Shared `socket_assign` uses TC listeners and policy routing without a
-delivery veth. Any combination of local and shared choices is valid. Shutdown
+routes. Isolated shared `socket_assign` uses the same namespace listeners,
+bidirectional veth and private policy routing as local socket assignment. Any combination of
+local and shared choices is valid. Shutdown
 detaches each selected backend and removes only routes owned by that instance. A
 disabled path does not load its object or create network state.
 
@@ -409,12 +467,25 @@ accepted only after its maps, programs, helpers, verifier load, and attachment
 path pass runtime probes; vendor backports and configuration differences make a
 release number alone insufficient.
 
+The compatibility CI includes a restricted stable 4.19.325 profile (cgroup and
+shared `packet_rewrite` TCP/UDP), 5.4 compatibility paths and 5.10/6.6 full paths.
+Cgroup UDP reply rewriting requires recvmsg hooks introduced in mainline 5.2
+and backported to the pinned 4.19.325 stable kernel; older patch levels may lack
+them. Socket assignment requires `bpf_sk_assign` from 5.7. Thus 4.19 is not a
+full-feature minimum. These are validation targets and feature boundaries,
+not a guarantee for every kernel with the same version; see [DEVELOPING.md](DEVELOPING.md).
+
 ### Standard Linux and OpenWrt
 
 Use a Linux kernel with BPF syscall support, cgroup v2 when the local
 `cgroup` path is enabled, and the TC classifier facilities required by the
-selected path. Local TC additionally needs a usable veth implementation and
-writable policy-routing and interface sysctls. `packet_rewrite` needs Ethernet
+selected path. Isolated local socket assignment and shared socket assignment additionally need
+`CONFIG_NET_NS`, `CONFIG_VETH`, `CAP_SYS_ADMIN` for `unshare`/`setns`, and
+`CAP_NET_ADMIN` for private routes, links and transparent sockets. These
+facilities predate `bpf_sk_assign` and do not raise that path's upstream kernel
+feature floor. Netkit, `bpf_redirect_peer`, TCX and a global BTF are not required.
+Kernels without namespaces can still use cgroup/packet-rewrite paths.
+`packet_rewrite` needs Ethernet
 framing; `socket_assign` can also use the documented raw-IP and tunnel link
 types. Run the probe and service as root; [Runtime privileges](#runtime-privileges)
 lists the individual capabilities.
@@ -436,7 +507,8 @@ commonly restrict cgroup hooks or TCX independently; runtime fallbacks are
 selected separately. A denied optional socket-release or process-tracking hook
 does not by itself make the main data plane unsupported.
 
-Local TC also needs the vendor kernel's veth, TC, route, and sysctl facilities;
+Isolated local socket assignment and shared socket assignment also need vendor namespace
+creation/reentry permissions (including SELinux), veth, TC, routes and sysctls;
 cgroup-only local interception does not need veth or TC. Shared
 `packet_rewrite` requires an Ethernet-framed downstream interface, while
 `socket_assign` supports the documented L3/raw-IP variants. Validate the exact

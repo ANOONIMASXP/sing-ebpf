@@ -95,7 +95,6 @@ func TestCgroupInitialBypassCIDRCountTracksLoadedPolicy(t *testing.T) {
 	}
 	defer selfBypassMap.Close()
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: true,
 		Local: ActionScope{
 			Default: DecisionIntercept,
 			DestinationCIDR: []CIDRDecision{
@@ -160,19 +159,69 @@ func TestCgroupUDPRecoverySweepRemovesExpiredEntries(t *testing.T) {
 	if err = updateMap(backend.udpRecoveryMapFD, unsafe.Pointer(&key), unsafe.Pointer(&value)); err != nil {
 		t.Fatal(err)
 	}
-	// The sweep cannot find anything stale while the uptime is below its
-	// idle limit, so keep the limit short enough for a freshly booted VM.
-	result, err := backend.SweepUDPRecovery(time.Millisecond, 1024)
-	if err != nil {
-		t.Fatal(err)
+	var removed uint32
+	var complete bool
+	for pass := 0; pass < 8; pass++ {
+		// Unsupported batch commands switch to the bounded per-key iterator
+		// on the next maintenance pass; a single pass need not finish.
+		result, err := backend.SweepUDPRecovery(time.Nanosecond, 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed += result.Removed
+		complete = result.Complete
+		if complete {
+			break
+		}
 	}
-	if result.Removed != 1 {
-		t.Fatalf("recovery sweep removed %d entries, want 1", result.Removed)
+	if !complete || removed != 1 {
+		t.Fatalf("recovery sweep complete=%v removed=%d, want true/1", complete, removed)
 	}
 	var current originalDestinationValue
 	if err = lookupMap(backend.udpRecoveryMapFD, unsafe.Pointer(&key), unsafe.Pointer(&current)); !errors.Is(err, unix.ENOENT) {
 		t.Fatalf("expired recovery entry remained: %v", err)
 	}
+}
+
+func TestCgroupUDPRecoverySweepAccountsAcrossPartialPasses(t *testing.T) {
+	requireEBPFIntegration(t, "test bounded cgroup recovery accounting")
+	m, err := CiliumEBPF.NewMap(&CiliumEBPF.MapSpec{
+		Type: CiliumEBPF.LRUHash, KeySize: uint32(unsafe.Sizeof(listenerLookupKey{})),
+		ValueSize: uint32(unsafe.Sizeof(originalDestinationValue{})), MaxEntries: 64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	backend := &CgroupBackend{
+		runtime:          &cgroupRuntime{maps: map[string]*CiliumEBPF.Map{"cgroup_udp_recovery": m}},
+		udpRecoveryMapFD: m.FD(), mapCapacity: CgroupMapCapacity{UDPRedirect: 64},
+	}
+	backend.recoverySweepScratch.lookupSupport.mode.Store(mapBatchUnsupported)
+	for port := uint16(41000); port < 41003; port++ {
+		key, err := makeListenerLookupKey(ProtocolUDP, netip.AddrPortFrom(netip.MustParseAddr("127.128.0.1"), port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = m.Put(key, originalDestinationValue{CreatedAtNS: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var removed uint32
+	for pass := 0; pass < 8; pass++ {
+		result, err := backend.SweepUDPRecovery(time.Nanosecond, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed += result.Removed
+		if result.Complete {
+			if removed != 3 || result.Usage.Entries != 0 {
+				t.Fatalf("removed=%d final usage=%+v, want 3/0", removed, result.Usage)
+			}
+			return
+		}
+	}
+	t.Fatal("bounded recovery scan did not complete")
 }
 
 // TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass exercises the real
@@ -193,7 +242,6 @@ func TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass(t *testing.T) {
 	}
 	uid := uint32(os.Geteuid())
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableUDP: true,
 		Local: ActionScope{
 			Default: DecisionPass,
 			UID:     []UIDDecision{{Start: uid, End: uid, Action: DecisionIntercept}},
@@ -307,10 +355,11 @@ func TestCgroupUDPFlowCacheDoesNotOverrideUIDBypass(t *testing.T) {
 	assertUDPNotReceived(t, token)
 }
 
-// TestCgroupForceInterceptSlotsIntegration requires both force-intercept slots
-// of a family to override a pass default, while other destinations keep it.
-func TestCgroupForceInterceptSlotsIntegration(t *testing.T) {
-	requireEBPFIntegration(t, "test cgroup force-intercept slots")
+// TestCgroupForceInterceptPrefixesIntegration requires every force-intercept
+// prefix of a family to override a pass default, while other destinations keep
+// it.
+func TestCgroupForceInterceptPrefixesIntegration(t *testing.T) {
+	requireEBPFIntegration(t, "test cgroup force-intercept prefixes")
 	cgroupRoot, err := DetectCgroup2Root()
 	if err != nil {
 		t.Skipf("cgroup v2 is unavailable: %v", err)
@@ -320,7 +369,6 @@ func TestCgroupForceInterceptSlotsIntegration(t *testing.T) {
 		t.Skip("cannot create a dedicated cgroup")
 	}
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableUDP: true,
 		Local: ActionScope{
 			Default: DecisionPass,
 			DestinationCIDR: []CIDRDecision{
@@ -680,10 +728,8 @@ func prepareCgroupIntegrationBackend(path string, enableTCP, enableUDP, enableIP
 		return nil, err
 	}
 	policy, err := CompileActionPolicy(ActionPolicy{
-		EnableTCP: enableTCP,
-		EnableUDP: enableUDP,
-		Local:     ActionScope{Default: DecisionIntercept},
-		Shared:    ActionScope{Default: DecisionIntercept},
+		Local:  ActionScope{Default: DecisionIntercept},
+		Shared: ActionScope{Default: DecisionIntercept},
 	})
 	if err != nil {
 		_ = selfBypassMap.Close()
@@ -766,25 +812,7 @@ func assertCgroupUDPMapHandoff(t *testing.T, backend *CgroupBackend) {
 	if _, err = backend.TakeOriginal(ProtocolUDP, listener); err != nil {
 		t.Fatal(err)
 	}
-	assertCgroupRedirectTaken(t, backend, ProtocolUDP, listener)
-}
-
-// assertCgroupRedirectTaken checks the entry after TakeOriginal. Without
-// BPF_MAP_LOOKUP_AND_DELETE_ELEM for hash maps (before Linux 5.14) the take
-// deliberately leaves the entry for expiry instead of emulating the atomic
-// consume with a lookup and a separate delete.
-func assertCgroupRedirectTaken(t *testing.T, backend *CgroupBackend, protocol uint8, listener netip.AddrPort) {
-	t.Helper()
-	_, err := backend.LookupOriginal(protocol, listener)
-	if backend.lookupAndDeleteMode.Load() == mapLookupAndDeleteUnsupported {
-		if err != nil {
-			t.Fatalf("redirect was removed although lookup-and-delete is unsupported: %v", err)
-		}
-		return
-	}
-	if !errors.Is(err, unix.ENOENT) {
-		t.Fatalf("redirect remained after take: %v", err)
-	}
+	assertCgroupHandoffCleanup(t, backend, ProtocolUDP, listener)
 }
 
 func assertCgroupTCPMapHandoff(t *testing.T, backend *CgroupBackend) {
@@ -812,7 +840,26 @@ func assertCgroupTCPMapHandoff(t *testing.T, backend *CgroupBackend) {
 	if recovered.Destination != netip.MustParseAddrPort("192.0.2.20:443") {
 		t.Fatalf("unexpected TCP original destination: got %s", recovered.Destination)
 	}
-	assertCgroupRedirectTaken(t, backend, ProtocolTCP, listener)
+	assertCgroupHandoffCleanup(t, backend, ProtocolTCP, listener)
+}
+
+func assertCgroupHandoffCleanup(t *testing.T, backend *CgroupBackend, protocol uint8, listener netip.AddrPort) {
+	t.Helper()
+	_, err := backend.LookupOriginal(protocol, listener)
+	if backend.lookupAndDeleteMode.Load() == mapLookupAndDeleteUnsupported {
+		// The documented fallback retains the bounded entry. A separate
+		// lookup/delete would race a kernel replacement of the same key.
+		if err != nil {
+			t.Fatalf("non-atomic handoff did not retain its record: %v", err)
+		}
+		if err = backend.DeleteRedirect(protocol, listener); err != nil {
+			t.Fatal(err)
+		}
+		_, err = backend.LookupOriginal(protocol, listener)
+	}
+	if !errors.Is(err, unix.ENOENT) {
+		t.Fatalf("redirect remained after atomic take or explicit cleanup: %v", err)
+	}
 }
 
 func cgroupIntegrationUnavailable(err error) bool {

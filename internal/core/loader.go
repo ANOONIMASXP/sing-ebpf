@@ -236,6 +236,16 @@ type mapSpecOverride struct {
 	flags      uint32
 }
 
+func validateKernelObjectName(name string) error {
+	if name == "" {
+		return E.New("empty eBPF kernel object name")
+	}
+	if len(name) > kernelObjectNameLimit {
+		return E.New("eBPF kernel object name ", name, " exceeds the ", kernelObjectNameLimit, "-byte limit")
+	}
+	return nil
+}
+
 func loadObjectMaps(
 	loadSpec func() (*CiliumEBPF.CollectionSpec, error),
 	overrides map[string]mapSpecOverride,
@@ -251,7 +261,10 @@ func loadObjectMaps(
 			delete(spec.Maps, name)
 			continue
 		}
-		if override.name == "" || override.mapType == CiliumEBPF.UnspecifiedMap || override.maxEntries == 0 {
+		if err = validateKernelObjectName(override.name); err != nil {
+			return nil, E.Cause(err, "invalid eBPF map override for ", name)
+		}
+		if override.mapType == CiliumEBPF.UnspecifiedMap || override.maxEntries == 0 {
 			return nil, E.New("invalid eBPF map override for ", name)
 		}
 		mapSpec.Name = override.name

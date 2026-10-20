@@ -213,7 +213,7 @@ func TestCgroupKernelProgramNamesIdentifyTheirSlot(t *testing.T) {
 	for _, definition := range cgroupProgramDefinitions {
 		for slot := range MaxInstanceSlots {
 			name := cgroupKernelProgramName(definition.kernelProgramName, slot)
-			if len(name) > 15 {
+			if len(name) > kernelObjectNameLimit {
 				t.Errorf("slot %d name %q exceeds the kernel's 15-byte limit", slot, name)
 			}
 			if got := cgroupProgramSlot(name); got != slot {

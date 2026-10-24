@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	commonEBPF "github.com/MiChongs/sing-ebpf"
+	commonEBPF "github.com/ANOONIMASXP/sing-ebpf"
 	"github.com/sagernet/netlink"
 	E "github.com/sagernet/sing/common/exceptions"
 )

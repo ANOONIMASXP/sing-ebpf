@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/MiChongs/sing-ebpf"
+	core "github.com/ANOONIMASXP/sing-ebpf"
 	"github.com/sagernet/netlink"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"

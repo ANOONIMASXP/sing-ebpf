@@ -7,7 +7,7 @@ import (
 	"io"
 	"testing"
 
-	commonEBPF "github.com/MiChongs/sing-ebpf"
+	commonEBPF "github.com/ANOONIMASXP/sing-ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/sagernet/netlink"
 )

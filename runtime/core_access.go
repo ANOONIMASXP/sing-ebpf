@@ -3,8 +3,8 @@
 package runtime
 
 import (
-	public "github.com/MiChongs/sing-ebpf"
-	core "github.com/MiChongs/sing-ebpf/internal/core"
+	public "github.com/ANOONIMASXP/sing-ebpf"
+	core "github.com/ANOONIMASXP/sing-ebpf/internal/core"
 )
 
 func rawTCBackend(backend *public.TCBackend) *core.TCBackend {

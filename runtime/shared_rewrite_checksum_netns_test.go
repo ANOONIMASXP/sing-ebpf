@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	commonEBPF "github.com/MiChongs/sing-ebpf"
+	commonEBPF "github.com/ANOONIMASXP/sing-ebpf"
 	"github.com/sagernet/netlink"
 	"golang.org/x/sys/unix"
 )

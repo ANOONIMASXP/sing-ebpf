@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	commonEBPF "github.com/MiChongs/sing-ebpf"
-	core "github.com/MiChongs/sing-ebpf/internal/core"
+	commonEBPF "github.com/ANOONIMASXP/sing-ebpf"
+	core "github.com/ANOONIMASXP/sing-ebpf/internal/core"
 	CiliumEBPF "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/sagernet/netlink"

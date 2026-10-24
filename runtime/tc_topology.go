@@ -3,7 +3,7 @@
 package runtime
 
 import (
-	core "github.com/MiChongs/sing-ebpf"
+	core "github.com/ANOONIMASXP/sing-ebpf"
 	"github.com/sagernet/netlink"
 	E "github.com/sagernet/sing/common/exceptions"
 )

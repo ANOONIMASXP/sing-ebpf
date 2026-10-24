@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	core "github.com/MiChongs/sing-ebpf/internal/core"
+	core "github.com/ANOONIMASXP/sing-ebpf/internal/core"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 

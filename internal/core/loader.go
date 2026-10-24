@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	BPFGen "github.com/MiChongs/sing-ebpf/internal/bpfgen"
+	BPFGen "github.com/ANOONIMASXP/sing-ebpf/internal/bpfgen"
 	E "github.com/sagernet/sing/common/exceptions"
 
 	CiliumEBPF "github.com/cilium/ebpf"

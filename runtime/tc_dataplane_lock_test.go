@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	commonEBPF "github.com/MiChongs/sing-ebpf"
-	core "github.com/MiChongs/sing-ebpf/internal/core"
+	commonEBPF "github.com/ANOONIMASXP/sing-ebpf"
+	core "github.com/ANOONIMASXP/sing-ebpf/internal/core"
 	"github.com/sagernet/netlink"
 	E "github.com/sagernet/sing/common/exceptions"
 )

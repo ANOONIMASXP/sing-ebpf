@@ -1,4 +1,4 @@
-module github.com/MiChongs/sing-ebpf
+module github.com/ANOONIMASXP/sing-ebpf
 
 go 1.25.5
 

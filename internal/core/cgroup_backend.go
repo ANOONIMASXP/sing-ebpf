@@ -90,15 +90,16 @@ type cgroupRuntime struct {
 	// getpeername_supported reports Linux 5.8+ getpeername hooks. They are
 	// optional: without them a redirected socket reports its listener token
 	// as the peer, as before.
-	getpeername_supported bool
-	coarse_time_supported bool
-	enable_tcp            bool
-	enable_udp            bool
-	uid_policy            bool
-	uid_default_bypass    bool
-	bypass_ipv4_policy    bool
-	bypass_ipv6_policy    bool
-	bypass_port_policy    bool
+	getpeername4_supported bool
+	getpeername6_supported bool
+	coarse_time_supported  bool
+	enable_tcp             bool
+	enable_udp             bool
+	uid_policy             bool
+	uid_default_bypass     bool
+	bypass_ipv4_policy     bool
+	bypass_ipv6_policy     bool
+	bypass_port_policy     bool
 }
 
 type CgroupBackend struct {
@@ -257,7 +258,8 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 		bypass_port_policy:       len(policy.localBypassPortEntries) > 0,
 		socket_release_supported: socketReleaseSupported,
 		coarse_time_supported:    coarseTimeSupported,
-		getpeername_supported:    probeGetpeernameSupport(),
+		getpeername4_supported:   probeGetpeernameSupport(CiliumEBPF.AttachCgroupInet4GetPeername),
+		getpeername6_supported:   probeGetpeernameSupport(CiliumEBPF.AttachCgroupInet6GetPeername),
 	}
 	if err = prepareCgroupMaps(runtimeState, mapCapacity, len(uidPolicyEntries), len(policy.localBypassPortEntries), config.SelfBypassMap, policy.localForce); err != nil {
 		_ = closeMaps(runtimeState.maps)

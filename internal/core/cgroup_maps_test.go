@@ -78,7 +78,7 @@ func TestConfiguredPolicyMapPressureIsNeutral(t *testing.T) {
 }
 
 func TestMapMetadataClassifiesConfiguredPolicyMaps(t *testing.T) {
-	if got := metadataForMapName(cgroupBypassPortKernelMapName).category; got != MapCategoryConfiguredPolicy {
+	if got := metadataForMapName("sb_cg_byp_port").category; got != MapCategoryConfiguredPolicy {
 		t.Fatalf("cgroup bypass-port map category = %q, want %q", got, MapCategoryConfiguredPolicy)
 	}
 	if got := metadataForMapName("sb_tc_uid").category; got != MapCategoryConfiguredPolicy {
@@ -94,7 +94,7 @@ func TestKernelObjectNameLimit(t *testing.T) {
 		name string
 		ok   bool
 	}{
-		{name: "sb_cg_bypass_po", ok: true},
+		{name: "sb_cg_byp_port", ok: true},
 		{name: "123456789012345", ok: true},
 		{name: "1234567890123456", ok: false},
 	} {
@@ -128,6 +128,21 @@ func TestMapOccupancyStatusIgnoresNonApplicableMaps(t *testing.T) {
 	})
 	if status != "degraded" {
 		t.Fatalf("map occupancy status = %q, want degraded after recovery failure", status)
+	}
+}
+
+func TestMapMetadataDistinguishesAssignmentOwnership(t *testing.T) {
+	assignment := metadataForMapName("sb_tc_assign")
+	if assignment.category != MapCategoryRuntime || assignment.evictionMode != mapEvictionNone || !assignment.admissionCritical {
+		t.Fatalf("assignment metadata = %+v, want retained admission-critical runtime state", assignment)
+	}
+	cache := metadataForMapName("sb_tc_rfrag")
+	if cache.evictionMode != mapEvictionLRUSafeCache || cache.admissionCritical {
+		t.Fatalf("auxiliary metadata = %+v, want safe LRU cache", cache)
+	}
+	policy := metadataForMapName("sb_tc_uid")
+	if policy.category != MapCategoryConfiguredPolicy || policy.evictionMode != mapEvictionNone {
+		t.Fatalf("policy metadata = %+v, want configured non-evicting policy", policy)
 	}
 }
 

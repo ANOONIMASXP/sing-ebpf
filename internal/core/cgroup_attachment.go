@@ -405,7 +405,7 @@ func detachOwnedCgroupPrograms(cgroupFD int, slot int) error {
 				continue
 			}
 			if (definition.attachType == CiliumEBPF.AttachCgroupInet4GetPeername ||
-				definition.attachType == CiliumEBPF.AttachCgroupInet6GetPeername) && socketReleaseUnavailable(err) {
+				definition.attachType == CiliumEBPF.AttachCgroupInet6GetPeername) && getpeernameUnavailable(err) {
 				continue
 			}
 			return err

@@ -9,6 +9,7 @@
 #include <linux/bpf.h>
 
 #define BPF_ANY 0U
+#define BPF_NOEXIST 1U
 #define BPF_F_CURRENT_NETNS (-1ULL)
 #define BPF_F_INGRESS (1ULL << 0)
 #define BPF_TCP_LISTEN 10U
@@ -149,6 +150,12 @@ struct sb_tc_assign_value {
     __u32 generation;
 };
 
+struct sb_tc_assignment_claim {
+    __u64 socket_cookie;
+    __u32 generation;
+    __u32 reserved;
+};
+
 _Static_assert(sizeof(struct sb_tc_control) == 32, "sb_tc_control ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, delivery_ifindex) == 8,
     "sb_tc_control delivery_ifindex ABI offset");
@@ -164,6 +171,7 @@ _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, last_seen_ns) == 8,
     "sb_tc_assign_value last_seen_ns ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, generation) == 28,
     "sb_tc_assign_value generation ABI offset");
+_Static_assert(sizeof(struct sb_tc_assignment_claim) == 16, "sb_tc_assignment_claim ABI size");
 
 struct ethernet_header {
     __u8 destination[6];
@@ -227,11 +235,25 @@ struct ipv6_fragment_header {
         .max_entries = entries, \
     }
 
+#define MAP_FLAGS(name, key, value, map_type, entries, flags) \
+    struct bpf_map_def SEC("maps") name = { \
+        .type = map_type, .key_size = sizeof(key), .value_size = sizeof(value), \
+        .max_entries = entries, .map_flags = flags, \
+    }
+
 MAP(tc_control, __u32, struct sb_tc_control, BPF_MAP_TYPE_ARRAY, 1U);
 MAP(tc_listener_sockets, __u32, __u32, BPF_MAP_TYPE_SOCKMAP, SB_TC_LISTENER_COUNT);
-MAP(tc_assignment, struct sb_tc_assign_key, struct sb_tc_assign_value, BPF_MAP_TYPE_LRU_HASH, 65536U);
+/* Assignment ownership is explicit: userspace reclaims entries by generation
+ * and activity timestamp. Do not let the kernel silently evict a live flow. */
+MAP_FLAGS(tc_assignment, struct sb_tc_assign_key, struct sb_tc_assign_value, BPF_MAP_TYPE_HASH, 32768U, BPF_F_NO_PREALLOC);
+/* Short-lived publication claims serialize tuple reuse without adding a
+ * spin-lock to every active assignment value. Claims are deleted immediately
+ * after publication and are never part of the data-plane lookup path. */
+MAP_FLAGS(tc_assignment_claim, struct sb_tc_assign_key, struct sb_tc_assignment_claim, BPF_MAP_TYPE_HASH, 32768U, BPF_F_NO_PREALLOC);
 MAP(tc_stats, __u32, __u64, BPF_MAP_TYPE_PERCPU_ARRAY, SB_TC_STAT_COUNT);
-MAP(tc_self_sockets, __u64, __u32, BPF_MAP_TYPE_LRU_HASH, 65536U);
+/* Self-bypass is core ownership state. Userspace or sock_release removes
+ * entries; silent LRU eviction can recapture an active proxy socket. */
+MAP_FLAGS(tc_self_sockets, __u64, __u32, BPF_MAP_TYPE_HASH, 65536U, BPF_F_NO_PREALLOC);
 MAP(tc_uid_policy, struct sb_tc_uid_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
 MAP(tc_local_bypass_ipv4, struct sb_tc_ipv4_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 65536U);
 MAP(tc_local_bypass_ipv6, struct sb_tc_ipv6_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 65536U);

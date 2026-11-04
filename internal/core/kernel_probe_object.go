@@ -87,12 +87,13 @@ func loadCgroupProbeObject(plan kernelProbePlan) (string, error) {
 		return "Loads the generated cgroup programs without attaching cgroup hooks.", err
 	}
 	runtimeState := &cgroupRuntime{
-		maps:                  make(map[string]*CiliumEBPF.Map),
-		programs:              make([]*CiliumEBPF.Program, cgroupProgramCount),
-		enable_tcp:            plan.enableTCP,
-		enable_udp:            plan.enableUDP,
-		coarse_time_supported: plan.enableUDP && features.HaveProgramHelper(CiliumEBPF.CGroupSockAddr, asm.FnKtimeGetCoarseNs) == nil,
-		getpeername_supported: probeGetpeernameSupport(),
+		maps:                   make(map[string]*CiliumEBPF.Map),
+		programs:               make([]*CiliumEBPF.Program, cgroupProgramCount),
+		enable_tcp:             plan.enableTCP,
+		enable_udp:             plan.enableUDP,
+		coarse_time_supported:  plan.enableUDP && features.HaveProgramHelper(CiliumEBPF.CGroupSockAddr, asm.FnKtimeGetCoarseNs) == nil,
+		getpeername4_supported: probeGetpeernameSupport(CiliumEBPF.AttachCgroupInet4GetPeername),
+		getpeername6_supported: probeGetpeernameSupport(CiliumEBPF.AttachCgroupInet6GetPeername),
 	}
 	backend := &CgroupBackend{
 		runtime:      runtimeState,
@@ -124,7 +125,7 @@ func loadCgroupProbeObject(plan kernelProbePlan) (string, error) {
 
 func loadProcessTrackerProbeObject(plan kernelProbePlan) (string, error) {
 	owners, err := CiliumEBPF.NewMap(&CiliumEBPF.MapSpec{
-		Name:       "sb_proc_owner_probe",
+		Name:       "sb_proc_probe",
 		Type:       CiliumEBPF.LRUHash,
 		KeySize:    8,
 		ValueSize:  8,

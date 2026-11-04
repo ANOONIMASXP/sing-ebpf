@@ -68,10 +68,11 @@ func (b *CgroupBackend) loadCgroupObjectPrograms() ([]*CiliumEBPF.Program, error
 	}
 	normalMaps := b.runtime.maps
 	loaded, err := loadObjectPrograms(loadSpec, normalMaps, normalSelections)
-	if err != nil && b.runtime.getpeername_supported {
+	if err != nil && (b.runtime.getpeername4_supported || b.runtime.getpeername6_supported) {
 		// The getpeername hooks are optional; a verifier that rejects them
 		// must not take interception down with them.
-		b.runtime.getpeername_supported = false
+		b.runtime.getpeername4_supported = false
+		b.runtime.getpeername6_supported = false
 		return b.loadCgroupObjectPrograms()
 	}
 	if err != nil && b.runtime.coarse_time_supported && coarseTimeUnavailable(err) {
@@ -151,9 +152,9 @@ func (b *CgroupBackend) cgroupProgramEnabled(slot int) bool {
 	case cgroupProgramSocketRelease:
 		return b.runtime.enable_udp && b.runtime.socket_release_supported
 	case cgroupProgramGetpeername4:
-		return enableIPv4 && b.runtime.getpeername_supported
+		return enableIPv4 && b.runtime.getpeername4_supported
 	case cgroupProgramGetpeername6:
-		return (enableIPv4 || enableIPv6) && b.runtime.getpeername_supported
+		return (enableIPv4 || enableIPv6) && b.runtime.getpeername6_supported
 	default:
 		return false
 	}

@@ -5,6 +5,7 @@ package core
 import (
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 
 	CiliumEBPF "github.com/cilium/ebpf"
@@ -49,6 +50,33 @@ type processTrackerHook struct {
 	attachType        CiliumEBPF.AttachType
 }
 
+// ProcessTrackerHookReport describes the attachment result of one legacy
+// process-tracking hook. Error is set when the hook could not be loaded or
+// attached; the socket-create hook may still cover ownership in that case.
+type ProcessTrackerHookReport struct {
+	Hook     string
+	Attached bool
+	Error    string
+}
+
+// ProcessTrackerAttachReport describes how a ProcessTracker attached. The
+// socket-create hook is reported separately because it is the only hook that
+// remains attachable when Android netd holds the legacy root hooks in
+// single-program mode.
+type ProcessTrackerAttachReport struct {
+	CreateHook     bool
+	CreateError    string
+	ReleaseCleanup bool
+	LegacyHooks    []ProcessTrackerHookReport
+}
+
+// Clone returns a deep copy so callers cannot mutate the tracker's record.
+func (r ProcessTrackerAttachReport) Clone() ProcessTrackerAttachReport {
+	cloned := r
+	cloned.LegacyHooks = append([]ProcessTrackerHookReport(nil), r.LegacyHooks...)
+	return cloned
+}
+
 // ProcessTracker records the process performing connect or UDP sendmsg for a
 // socket. Socket cookies let the TC data path carry that identity to userspace
 // without searching every process file descriptor under procfs.
@@ -62,6 +90,7 @@ type ProcessTracker struct {
 	links               []cgroupProgramLink
 	releaseCleanup      bool
 	createHook          bool
+	attachReport        ProcessTrackerAttachReport
 }
 
 // detectCgroup2Root is replaced in tests so AttachProcessTracker can attach
@@ -129,12 +158,18 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 	// Establish cleanup before any hook can publish an application cookie.
 	// Appending it first also keeps cleanup attached until all writers detach.
 	tracker.attachReleaseCleanup(cgroupPath)
+	tracker.attachReport.ReleaseCleanup = tracker.releaseCleanup
 	// Socket creation is the primary owner hook: its attach type never
 	// shares a hook with the connect/sendmsg placeholders Android netd keeps
 	// on the cgroup v2 root, so it stays attachable where the legacy hooks
 	// below are refused. A create failure only matters when no legacy hook
 	// attaches either.
 	createErr := tracker.attachCreateHook(cgroupPath, config)
+	if createErr != nil {
+		tracker.attachReport.CreateError = createErr.Error()
+	} else {
+		tracker.attachReport.CreateHook = true
+	}
 	for _, hook := range processTrackerHooks(config) {
 		program, loadErr := newProcessTrackerProgram(hook, owners.FD(), tracker.policyUIDFD(), tracker.metadataFD(), tracker.policyDefaultBypass)
 		if loadErr != nil {
@@ -142,6 +177,10 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 				// The create hook already records every enabled protocol;
 				// a failed legacy hook only loses the connect-time owner
 				// correction for sockets created before the tracker ran.
+				tracker.attachReport.LegacyHooks = append(tracker.attachReport.LegacyHooks, ProcessTrackerHookReport{
+					Hook:  hook.hookName,
+					Error: loadErr.Error(),
+				})
 				continue
 			}
 			return rollbackProcessTracker(tracker, E.Errors(createErr, loadErr))
@@ -155,11 +194,23 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error) 
 		programLink, attachErr := attachCgroupProgramShared(cgroupPath, program, hook.attachType)
 		if attachErr != nil {
 			if createErr == nil {
+				// Release the unattached program immediately; the tracker
+				// only keeps programs that back an active link.
+				_ = program.Close()
+				tracker.programs = tracker.programs[:len(tracker.programs)-1]
+				tracker.attachReport.LegacyHooks = append(tracker.attachReport.LegacyHooks, ProcessTrackerHookReport{
+					Hook:  hook.hookName,
+					Error: attachErr.Error(),
+				})
 				continue
 			}
 			return rollbackProcessTracker(tracker, E.Errors(createErr, E.Cause(attachErr, "attach eBPF process tracker ", hook.hookName, " hook")))
 		}
 		tracker.links = append(tracker.links, programLink)
+		tracker.attachReport.LegacyHooks = append(tracker.attachReport.LegacyHooks, ProcessTrackerHookReport{
+			Hook:     hook.hookName,
+			Attached: true,
+		})
 	}
 	return tracker, nil
 }
@@ -177,6 +228,10 @@ func (t *ProcessTracker) attachCreateHook(cgroupPath string, config ProcessTrack
 	// root hook into single-program mode for an optional component.
 	programLink, err := attachCgroupProgramShared(cgroupPath, program, CiliumEBPF.AttachCGroupInetSockCreate)
 	if err != nil {
+		// The unattached program has no link to own it; close it now rather
+		// than keeping it until the tracker is released.
+		_ = program.Close()
+		t.programs = t.programs[:len(t.programs)-1]
 		return E.Cause(err, "attach eBPF process tracker socket-create hook")
 	}
 	t.links = append(t.links, programLink)
@@ -248,6 +303,67 @@ func (t *ProcessTracker) ReleaseCleanup() bool {
 // shows up in logs.
 func (t *ProcessTracker) CreateHook() bool {
 	return t != nil && t.createHook
+}
+
+// CreateHookError reports why the socket-create hook is unavailable. It is
+// empty when the hook attached or when attachment was not attempted.
+func (t *ProcessTracker) CreateHookError() string {
+	if t == nil {
+		return ""
+	}
+	return t.attachReport.CreateError
+}
+
+// AttachReport returns a snapshot of the attachment outcome, including every
+// legacy hook that was skipped while the socket-create hook kept ownership
+// tracking alive.
+func (t *ProcessTracker) AttachReport() ProcessTrackerAttachReport {
+	if t == nil {
+		return ProcessTrackerAttachReport{}
+	}
+	return t.attachReport.Clone()
+}
+
+// AttachSummary renders a compact, stable one-line attachment summary for
+// logs and diagnostics. It deliberately uses only strings so callers can
+// consume it through an optional interface without depending on this
+// package's report types.
+func (t *ProcessTracker) AttachSummary() string {
+	if t == nil {
+		return ""
+	}
+	report := t.attachReport
+	var summary strings.Builder
+	if report.CreateHook {
+		summary.WriteString("socket_create=attached")
+	} else {
+		summary.WriteString("socket_create=unavailable")
+	}
+	if report.CreateError != "" {
+		summary.WriteString("(")
+		summary.WriteString(report.CreateError)
+		summary.WriteString(")")
+	}
+	if report.ReleaseCleanup {
+		summary.WriteString("; release_cleanup=attached")
+	} else {
+		summary.WriteString("; release_cleanup=unavailable")
+	}
+	for _, hook := range report.LegacyHooks {
+		summary.WriteString("; ")
+		summary.WriteString(hook.Hook)
+		if hook.Attached {
+			summary.WriteString("=attached")
+		} else {
+			summary.WriteString("=skipped")
+		}
+		if hook.Error != "" {
+			summary.WriteString("(")
+			summary.WriteString(hook.Error)
+			summary.WriteString(")")
+		}
+	}
+	return summary.String()
 }
 
 func processTrackerHooks(config ProcessTrackerConfig) []processTrackerHook {

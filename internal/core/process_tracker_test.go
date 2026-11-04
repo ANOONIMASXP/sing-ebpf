@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -286,5 +287,54 @@ func TestProcessTrackerCreateHookDefault(t *testing.T) {
 	}
 	if (&ProcessTracker{}).CreateHook() {
 		t.Fatal("detached process tracker reports the socket-create hook")
+	}
+}
+
+func TestProcessTrackerAttachReportSnapshot(t *testing.T) {
+	tracker := &ProcessTracker{
+		createHook:     true,
+		releaseCleanup: false,
+		attachReport: ProcessTrackerAttachReport{
+			CreateHook:     true,
+			ReleaseCleanup: false,
+			LegacyHooks: []ProcessTrackerHookReport{
+				{Hook: "connect4", Attached: true},
+				{Hook: "sendmsg4", Error: "the program on this hook does more than allow, so it is kept"},
+			},
+		},
+	}
+	summary := tracker.AttachSummary()
+	for _, expected := range []string{
+		"socket_create=attached",
+		"release_cleanup=unavailable",
+		"connect4=attached",
+		"sendmsg4=skipped",
+	} {
+		if !strings.Contains(summary, expected) {
+			t.Fatalf("attach summary %q does not contain %q", summary, expected)
+		}
+	}
+	report := tracker.AttachReport()
+	report.LegacyHooks[0].Hook = "mutated"
+	if tracker.AttachReport().LegacyHooks[0].Hook != "connect4" {
+		t.Fatal("AttachReport returned the tracker's mutable slice")
+	}
+}
+
+func TestProcessTrackerAttachReportDefaults(t *testing.T) {
+	var tracker *ProcessTracker
+	if tracker.AttachSummary() != "" {
+		t.Fatal("nil process tracker has an attach summary")
+	}
+	if tracker.CreateHookError() != "" {
+		t.Fatal("nil process tracker reports a socket-create error")
+	}
+	if report := tracker.AttachReport(); report.CreateHook || len(report.LegacyHooks) != 0 {
+		t.Fatalf("nil process tracker report = %+v", report)
+	}
+	empty := (&ProcessTracker{}).AttachSummary()
+	if !strings.Contains(empty, "socket_create=unavailable") ||
+		!strings.Contains(empty, "release_cleanup=unavailable") {
+		t.Fatalf("empty attach summary = %q", empty)
 	}
 }

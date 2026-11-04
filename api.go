@@ -43,6 +43,8 @@ type (
 	SelfBypassMode                 = core.SelfBypassMode
 	ProcessSocketOwner             = core.ProcessSocketOwner
 	ProcessTracker                 = core.ProcessTracker
+	ProcessTrackerHookReport       = core.ProcessTrackerHookReport
+	ProcessTrackerAttachReport     = core.ProcessTrackerAttachReport
 	LocalRouteSet                  = core.LocalRouteSet
 	KernelProbeMode                = core.KernelProbeMode
 	KernelProbeDataPlane           = core.KernelProbeDataPlane

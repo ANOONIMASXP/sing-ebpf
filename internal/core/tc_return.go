@@ -22,7 +22,10 @@ type tcReturnValue struct {
 	NetworkGeneration uint32
 }
 
-const tcReturnRetiring uint32 = 1
+// tcReturnRetiring must match SB_TC_RETURN_RETIRING in native/tc_isolation.h.
+// The low 31 bits carry the network generation, so bit 31 (not bit 0) marks a
+// route as retiring.
+const tcReturnRetiring uint32 = 0x80000000
 
 type tcReturnReference struct {
 	key        tcAssignKey

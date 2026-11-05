@@ -145,3 +145,17 @@ func tcKeyAddress(family uint8, address [16]byte) netip.Addr {
 	}
 	return netip.AddrFrom16(address)
 }
+
+func TestTCReturnRetiringBitMatchesNative(t *testing.T) {
+	if tcReturnRetiring != 0x80000000 {
+		t.Fatalf("tcReturnRetiring = %#x, want 0x80000000", tcReturnRetiring)
+	}
+	value := tcReturnValue{NetworkGeneration: 1}
+	if value.NetworkGeneration&tcReturnRetiring != 0 {
+		t.Fatal("initial network generation is classified as retiring")
+	}
+	value.NetworkGeneration |= tcReturnRetiring
+	if value.NetworkGeneration&0x7fffffff != 1 {
+		t.Fatalf("retiring bit changed network generation: %#x", value.NetworkGeneration)
+	}
+}

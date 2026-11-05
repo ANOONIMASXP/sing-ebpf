@@ -22,10 +22,11 @@ func TestTCReturnRouteLifetimeIntegration(t *testing.T) {
 	}
 	defer returnMap.Close()
 	b.runtime.maps["tc_return"] = returnMap
+	b.control.NetworkGeneration = 1
 	b.assignmentCapacity = 2
 	source, destination := netip.MustParseAddrPort("192.0.2.2:41000"), netip.MustParseAddrPort("203.0.113.10:9681")
 	key, _ := makeTCAssignKey(ProtocolUDP, destination, source, 0)
-	value := tcReturnValue{LastSeenNS: 1, Generation: 42, InterfaceIndex: 7, Flags: 1}
+	value := tcReturnValue{LastSeenNS: 1, Generation: 42, InterfaceIndex: 7, Flags: 1, NetworkGeneration: 1}
 	if err = returnMap.Put(key, value); err != nil {
 		t.Fatal(err)
 	}

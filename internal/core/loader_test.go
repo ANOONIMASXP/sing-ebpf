@@ -317,6 +317,35 @@ func TestCgroupReleaseNotificationUsesRingBufferHelper(t *testing.T) {
 	}
 }
 
+func TestEmbeddedCgroupStorageObjectLayout(t *testing.T) {
+	spec, err := loadCgroupStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := spec.Maps["cgroup_socket_peer_storage"]
+	if storage == nil || storage.Type != CiliumEBPF.SkStorage || storage.ValueSize == 0 {
+		t.Fatalf("invalid cgroup socket storage map: %+v", storage)
+	}
+	if spec.Maps["cgroup_udp_peer"] != nil || spec.Maps["cgroup_tcp_peer"] != nil {
+		t.Fatal("socket-storage object still contains cookie-keyed peer maps")
+	}
+	foundHelper := false
+	for _, program := range spec.Programs {
+		for _, instruction := range program.Instructions {
+			if instruction.IsBuiltinCall() && asm.BuiltinFunc(instruction.Constant) == asm.FnSkStorageGet {
+				foundHelper = true
+				break
+			}
+		}
+		if foundHelper {
+			break
+		}
+	}
+	if !foundHelper {
+		t.Fatal("socket-storage object does not use bpf_sk_storage_get")
+	}
+}
+
 func TestEmbeddedTCObjectLayout(t *testing.T) {
 	testEmbeddedObjectLayout(t, loadTC, map[string]objectMapLayout{
 		"tc_control":             {4, 32},
@@ -325,7 +354,7 @@ func TestEmbeddedTCObjectLayout(t *testing.T) {
 		"tc_shared_force4":       {8, 1},
 		"tc_shared_force6":       {20, 1},
 		"tc_listener_sockets":    {4, 4},
-		"tc_assignment":          {44, 32},
+		"tc_assignment":          {44, 40},
 		"tc_assignment_claim":    {44, 16},
 		"tc_return":              {44, 40},
 		"tc_return_frag":         {44, 40},

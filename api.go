@@ -270,6 +270,7 @@ type TCConfig struct {
 	TrackProcess       bool
 	ICMPEchoReply      bool
 	AssignmentCapacity uint32
+	NetworkGeneration  uint32
 }
 
 type TCBackend struct {
@@ -292,6 +293,7 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
 		TrackProcess:       config.TrackProcess,
 		ICMPEchoReply:      config.ICMPEchoReply,
 		AssignmentCapacity: config.AssignmentCapacity,
+		NetworkGeneration:  config.NetworkGeneration,
 	}, config.SelfBypass)
 	if err != nil {
 		return nil, err
@@ -340,6 +342,10 @@ func (b *TCBackend) Stats() (TCStats, error) {
 
 func (b *TCBackend) SetDeliveryInterface(interfaceIndex uint32, hardwareAddress MACAddress) error {
 	return core.UnwrapTCBackend(b).SetDeliveryInterface(interfaceIndex, hardwareAddress)
+}
+
+func (b *TCBackend) SetNetworkGeneration(generation uint32) error {
+	return core.UnwrapTCBackend(b).SetNetworkGeneration(generation)
 }
 
 func (b *TCBackend) SetRoutingMark(mark uint32) error {

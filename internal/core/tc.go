@@ -107,6 +107,9 @@ type TCConfig struct {
 	SelfBypassMap      *CiliumEBPF.Map
 	TrackProcess       bool
 	AssignmentCapacity uint32
+	// NetworkGeneration identifies the current network incarnation. Zero uses
+	// the initial generation for callers that do not track handovers.
+	NetworkGeneration uint32
 	// ICMPEchoReply loads the independent icmp_echo_reply object (see
 	// tc_icmp_echo_reply.go) and attaches it wherever this TC data plane already
 	// attaches local or shared filters. Left false, prepareTC never touches
@@ -132,7 +135,8 @@ type tcControl struct {
 	DeliveryInterface uint32
 	RoutingMark       uint32
 	ListenerPort      uint16
-	ReservedPolicy    [2]uint16
+	ReservedPolicy    uint16
+	NetworkGeneration uint32
 	DeliveryMAC       MACAddress
 	Reserved          uint16
 }
@@ -151,17 +155,24 @@ type tcAssignKey struct {
 type tcAssignmentClaim struct {
 	SocketCookie uint64
 	Generation   uint32
-	Reserved     uint32
+	State        uint32
 }
 
+const (
+	tcAssignmentClaimPublish uint32 = 1
+	tcAssignmentClaimRetire  uint32 = 2
+)
+
 type TCAssignment struct {
-	SocketCookie   uint64
-	LastSeenNS     uint64
-	InterfaceIndex uint32
-	SourceMAC      MACAddress
-	Path           uint8
-	SourceMACValid uint8
-	Generation     uint32
+	SocketCookie      uint64
+	LastSeenNS        uint64
+	InterfaceIndex    uint32
+	SourceMAC         MACAddress
+	Path              uint8
+	SourceMACValid    uint8
+	Generation        uint32
+	NetworkGeneration uint32
+	Reserved          [4]byte
 }
 
 // TCAssignmentSweepResult describes one bounded cleanup pass. Entries are
@@ -328,11 +339,16 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	if err != nil {
 		return nil, explainBPFPermissionError(err, memlockErr)
 	}
+	networkGeneration := config.NetworkGeneration
+	if networkGeneration == 0 {
+		networkGeneration = 1
+	}
 	controlValue := tcControl{
 		Flags:             tcFlags(config, policy),
 		DeliveryInterface: config.DeliveryInterface,
 		RoutingMark:       config.RoutingMark,
 		ListenerPort:      config.ListenerPort,
+		NetworkGeneration: networkGeneration,
 	}
 	if len(includeIPv4)+len(includeIPv6) > 0 {
 		controlValue.Flags |= 1 << 12
@@ -609,6 +625,27 @@ func (b *TCBackend) SetDeliveryInterface(interfaceIndex uint32, hardwareAddress 
 	return nil
 }
 
+// SetNetworkGeneration advances the network incarnation used by the TC
+// packet path. Existing assignments and return routes remain in their maps
+// for bounded asynchronous reclamation, but are no longer eligible for lookup.
+func (b *TCBackend) SetNetworkGeneration(generation uint32) error {
+	if generation == 0 {
+		return E.New("invalid TC eBPF network generation")
+	}
+	b.access.Lock()
+	defer b.access.Unlock()
+	if err := b.requireUsableLocked(); err != nil {
+		return err
+	}
+	previous := b.control.NetworkGeneration
+	b.control.NetworkGeneration = generation
+	if err := b.updateControlLocked(); err != nil {
+		b.control.NetworkGeneration = previous
+		return err
+	}
+	return nil
+}
+
 const (
 	tcListenerUnregistered = iota
 	tcListenerInSockmap
@@ -730,6 +767,9 @@ func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.A
 	if err = lookupMap(b.assignmentMapFD, unsafe.Pointer(&key), unsafe.Pointer(&assignment)); err != nil {
 		return TCAssignment{}, err
 	}
+	if assignment.NetworkGeneration != b.control.NetworkGeneration {
+		return TCAssignment{}, unix.ENOENT
+	}
 	if remove {
 		_ = deleteMap(b.assignmentMapFD, unsafe.Pointer(&key))
 	}
@@ -769,6 +809,32 @@ func (b *TCBackend) RemoveAssignmentIfMatch(
 	if !sameTCAssignment(current, expected) {
 		return false, nil
 	}
+	claimMap := b.runtime.maps["tc_assignment_claim"]
+	if claimMap == nil {
+		return false, E.New("TC assignment claim map is unavailable")
+	}
+	claim := tcAssignmentClaim{
+		SocketCookie: current.SocketCookie,
+		Generation:   current.Generation,
+		State:        tcAssignmentClaimRetire,
+	}
+	if err = claimMap.Update(&key, &claim, CiliumEBPF.UpdateNoExist); err != nil {
+		if errors.Is(err, unix.EEXIST) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer claimMap.Delete(&key)
+	var fenced TCAssignment
+	if err = lookupMap(b.assignmentMapFD, unsafe.Pointer(&key), unsafe.Pointer(&fenced)); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !sameTCAssignment(fenced, expected) {
+		return false, nil
+	}
 	if err = deleteMap(b.assignmentMapFD, unsafe.Pointer(&key)); err != nil {
 		if errors.Is(err, unix.ENOENT) {
 			return false, nil
@@ -805,7 +871,7 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	defer b.assignmentSweepAccess.Unlock()
 	b.access.RLock()
 	defer b.access.RUnlock()
-	if b.runtime == nil || b.runtime.maps["tc_assignment"] == nil {
+	if b.runtime == nil || b.runtime.maps["tc_assignment"] == nil || b.runtime.maps["tc_assignment_claim"] == nil {
 		return TCAssignmentSweepResult{Failure: TCAssignmentSweepFailureClosed}, errBackendClosed
 	}
 	result := TCAssignmentSweepResult{Usage: MapUsage{Capacity: b.assignmentCapacity}, FailureMap: "sb_tc_assign"}
@@ -816,7 +882,8 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 	scan, err := b.assignmentSweepScratch.scan(
 		b.runtime.maps["tc_assignment"], b.assignmentCapacity, fallbackBudget,
 		func(key tcAssignKey, value TCAssignment) {
-			if value.LastSeenNS != 0 && value.LastSeenNS <= staleBefore {
+			if value.NetworkGeneration != b.control.NetworkGeneration ||
+				(value.LastSeenNS != 0 && value.LastSeenNS <= staleBefore) {
 				b.assignmentSweepCandidates = append(b.assignmentSweepCandidates, tcAssignmentSweepEntry{key: key, value: value})
 			}
 		},
@@ -843,25 +910,53 @@ func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint3
 			result.Superseded++
 			continue
 		}
-		if current.LastSeenNS > staleBefore {
+		if current.NetworkGeneration == b.control.NetworkGeneration && current.LastSeenNS > staleBefore {
 			result.InFlight++
 			continue
 		}
-		if claimMap := b.runtime.maps["tc_assignment_claim"]; claimMap != nil {
-			var claim tcAssignmentClaim
-			claimErr := lookupMap(claimMap.FD(), unsafe.Pointer(&candidate.key), unsafe.Pointer(&claim))
-			if claimErr == nil {
-				result.InFlight++
-				continue
+		claimMap := b.runtime.maps["tc_assignment_claim"]
+		claimHeld := false
+		if claimMap != nil {
+			claim := tcAssignmentClaim{
+				SocketCookie: candidate.value.SocketCookie,
+				Generation:   candidate.value.Generation,
+				State:        tcAssignmentClaimRetire,
 			}
-			if !errors.Is(claimErr, unix.ENOENT) {
+			if claimErr := claimMap.Update(&candidate.key, &claim, CiliumEBPF.UpdateNoExist); claimErr != nil {
+				if errors.Is(claimErr, unix.EEXIST) {
+					result.InFlight++
+					continue
+				}
 				result.Failure = TCAssignmentSweepFailureLookup
 				return result, claimErr
 			}
+			claimHeld = true
+			var fenced TCAssignment
+			if err = lookupMap(b.assignmentMapFD, unsafe.Pointer(&candidate.key), unsafe.Pointer(&fenced)); err != nil {
+				if errors.Is(err, unix.ENOENT) {
+					_ = claimMap.Delete(&candidate.key)
+					result.Missing++
+					continue
+				}
+				_ = claimMap.Delete(&candidate.key)
+				result.Failure = TCAssignmentSweepFailureLookup
+				return result, err
+			}
+			if !sameTCAssignment(fenced, candidate.value) || fenced.LastSeenNS > staleBefore {
+				_ = claimMap.Delete(&candidate.key)
+				result.InFlight++
+				continue
+			}
 		}
 		if err = deleteMap(b.assignmentMapFD, unsafe.Pointer(&candidate.key)); err != nil && !errors.Is(err, unix.ENOENT) {
+			if claimHeld {
+				_ = claimMap.Delete(&candidate.key)
+			}
 			result.Failure = TCAssignmentSweepFailureDelete
 			return result, err
+		}
+		if claimHeld {
+			_ = claimMap.Delete(&candidate.key)
 		}
 		result.Removed++
 		b.assignmentSweepRemoved++

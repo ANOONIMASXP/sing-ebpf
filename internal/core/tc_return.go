@@ -13,14 +13,16 @@ import (
 )
 
 type tcReturnValue struct {
-	LastSeenNS     uint64
-	Generation     uint64
-	InterfaceIndex uint32
-	Flags          uint32
-	SourceMAC      MACAddress
-	DestinationMAC MACAddress
-	Reserved       uint32
+	LastSeenNS        uint64
+	Generation        uint64
+	InterfaceIndex    uint32
+	Flags             uint32
+	SourceMAC         MACAddress
+	DestinationMAC    MACAddress
+	NetworkGeneration uint32
 }
+
+const tcReturnRetiring uint32 = 1
 
 type tcReturnReference struct {
 	key        tcAssignKey
@@ -73,6 +75,12 @@ func (b *TCBackend) AcquireReturnRoute(protocol uint8, source, destination netip
 	if value.Generation == 0 {
 		return TCReturnHandle{}, E.New("invalid TC return generation")
 	}
+	if value.NetworkGeneration&0x7fffffff != b.control.NetworkGeneration {
+		return TCReturnHandle{}, unix.ENOENT
+	}
+	if value.NetworkGeneration&tcReturnRetiring != 0 {
+		return TCReturnHandle{}, E.New("TC return route is retiring")
+	}
 	return b.retainReturnRouteLocked(key, value), nil
 }
 
@@ -110,6 +118,12 @@ func (b *TCBackend) AcquireReplyRoute(original TCReturnHandle, source netip.Addr
 	if value.Generation != ref.generation {
 		return TCReturnHandle{}, E.New("TC return route generation changed")
 	}
+	if value.NetworkGeneration&0x7fffffff != b.control.NetworkGeneration {
+		return TCReturnHandle{}, unix.ENOENT
+	}
+	if value.NetworkGeneration&tcReturnRetiring != 0 {
+		return TCReturnHandle{}, E.New("TC return route is retiring")
+	}
 	value.LastSeenNS = monotonicNowNS()
 	value.Generation = value.LastSeenNS
 	if err = returnMap.Update(&key, &value, CiliumEBPF.UpdateNoExist); err != nil && !errors.Is(err, unix.EEXIST) {
@@ -118,6 +132,9 @@ func (b *TCBackend) AcquireReplyRoute(original TCReturnHandle, source netip.Addr
 	var current tcReturnValue
 	if err = returnMap.Lookup(&key, &current); err != nil {
 		return TCReturnHandle{}, err
+	}
+	if current.NetworkGeneration&tcReturnRetiring != 0 {
+		return TCReturnHandle{}, E.New("TC reply route is retiring")
 	}
 	if current.InterfaceIndex != value.InterfaceIndex || current.Flags != value.Flags || current.SourceMAC != value.SourceMAC || current.DestinationMAC != value.DestinationMAC {
 		return TCReturnHandle{}, E.New("TC reply route belongs to another publisher")
@@ -158,7 +175,8 @@ func (b *TCBackend) sweepReturnRoutesLocked(maxIdle time.Duration, budget uint32
 	}
 	var candidates []candidate
 	scan, err := b.returnSweepScratch.scan(returnMap, b.assignmentCapacity, budget, func(key tcAssignKey, value tcReturnValue) {
-		if value.LastSeenNS != 0 && value.LastSeenNS <= staleBefore {
+		if value.NetworkGeneration&0x7fffffff != b.control.NetworkGeneration ||
+			(value.LastSeenNS != 0 && value.LastSeenNS <= staleBefore) {
 			candidates = append(candidates, candidate{key, value})
 		}
 	})
@@ -239,10 +257,30 @@ func (b *TCBackend) deleteIdleReturnRoute(returnMap *CiliumEBPF.Map, key tcAssig
 	if current != expected {
 		return false, "", nil
 	}
+	current.NetworkGeneration |= tcReturnRetiring
+	if err := returnMap.Update(&key, &current, CiliumEBPF.UpdateAny); err != nil {
+		return false, TCAssignmentSweepFailureLookup, err
+	}
+	var fenced tcReturnValue
+	if err := returnMap.Lookup(&key, &fenced); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, "", nil
+		}
+		return false, TCAssignmentSweepFailureLookup, err
+	}
+	if !sameTCReturnRoute(fenced, expected) || fenced.NetworkGeneration&tcReturnRetiring == 0 {
+		return false, "", nil
+	}
 	if err := returnMap.Delete(&key); errors.Is(err, unix.ENOENT) {
 		return false, "", nil
 	} else if err != nil {
 		return false, TCAssignmentSweepFailureDelete, err
 	}
 	return true, "", nil
+}
+
+func sameTCReturnRoute(left, right tcReturnValue) bool {
+	left.LastSeenNS, right.LastSeenNS = 0, 0
+	left.NetworkGeneration, right.NetworkGeneration = 0, 0
+	return left == right
 }

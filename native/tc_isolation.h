@@ -8,6 +8,8 @@
 // Requests the assignment record; never part of the stored return owner.
 #define SB_TC_REDIRECT_RECORD 0x200U
 #define SB_TC_ACTIVITY_REFRESH_NS 1000000000ULL
+#define SB_TC_RETURN_RETIRING 0x80000000U
+#define SB_TC_RETURN_NETWORK_MASK 0x7fffffffU
 
 // Activity is an idle-cleanup hint, not packet accounting. Coalesce writes
 // while preserving immediate publication of identity/generation changes.
@@ -23,7 +25,7 @@ struct sb_tc_return_value {
     __u32 flags;
     __u8 source_mac[6];
     __u8 destination_mac[6];
-    __u32 reserved;
+    __u32 network_generation;
 };
 _Static_assert(sizeof(struct sb_tc_return_value) == 40, "sb_tc_return_value ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_return_value, ifindex) == 16,
@@ -50,6 +52,8 @@ INLINE void reverse_flow(struct sb_tc_assign_key *reverse, const struct sb_tc_as
 INLINE bool same_return_owner(const struct sb_tc_return_value *left,
     const struct sb_tc_return_value *right) {
     return left->ifindex == right->ifindex && left->flags == right->flags &&
+        (left->network_generation & SB_TC_RETURN_NETWORK_MASK) ==
+            (right->network_generation & SB_TC_RETURN_NETWORK_MASK) &&
         source_mac_equal(left->source_mac, right->source_mac) &&
         source_mac_equal(left->destination_mac, right->destination_mac);
 }
@@ -85,6 +89,7 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
     __u64 now = ktime_get_ns();
     struct sb_tc_return_value value = {
         .last_seen_ns = now, .generation = now, .ifindex = skb->ifindex, .flags = flags,
+        .network_generation = control->network_generation & SB_TC_RETURN_NETWORK_MASK,
     };
     if (ethernet) {
         void *data = (void *)(long)skb->data;
@@ -97,6 +102,21 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
     struct sb_tc_assign_key reverse;
     reverse_flow(&reverse, flow);
     struct sb_tc_return_value *existing = map_lookup(&tc_return, &reverse);
+    if (existing != 0 && (existing->network_generation & SB_TC_RETURN_RETIRING) != 0U) {
+        increment_stat(SB_TC_STAT_RETURN_UPDATE_FAILURE);
+        return TC_ACT_SHOT;
+    }
+    if (existing != 0 &&
+        (existing->network_generation & SB_TC_RETURN_NETWORK_MASK) !=
+            (value.network_generation & SB_TC_RETURN_NETWORK_MASK)) {
+        // A handover leaves old routes for bounded userspace reclamation. A
+        // new incarnation may replace that stale route, but never overwrite a
+        // route belonging to the current network generation blindly.
+        if (map_update(&tc_return, &reverse, &value, BPF_ANY) != 0)
+            existing = 0;
+        else
+            existing = map_lookup(&tc_return, &reverse);
+    }
     if (existing == 0) {
         // Another CPU may publish this flow concurrently. Never overwrite a
         // different publisher (e.g. overlapping addresses on two LANs).
@@ -116,24 +136,35 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
     if (!record) return deliver_isolated(skb, control, ethernet);
 
     struct sb_tc_assign_value *previous = map_lookup(&tc_assignment, flow);
+    struct sb_tc_assignment_claim *existing_claim = map_lookup(&tc_assignment_claim, flow);
+    // A userspace retirement claim fences this incarnation while it is being
+    // rechecked and deleted. Do not refresh or republish it from the fast path;
+    // the caller will release the claim after the conditional delete.
+    if (existing_claim != 0 && existing_claim->state == SB_TC_ASSIGNMENT_CLAIM_RETIRE) {
+        increment_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILURE);
+        return TC_ACT_SHOT;
+    }
     struct sb_tc_assign_value assignment = {
         .socket_cookie = cookie, .last_seen_ns = now, .ifindex = value.ifindex,
         .path = path, .source_mac_valid = ethernet && path == SB_TC_PATH_SHARED,
         .generation = next_assignment_generation(previous),
+        .network_generation = control->network_generation,
     };
     __builtin_memcpy(assignment.source_mac, value.destination_mac, 6U);
     if (previous != 0 && previous->socket_cookie == cookie && previous->ifindex == value.ifindex &&
         previous->path == path && previous->source_mac_valid == assignment.source_mac_valid &&
+        previous->network_generation == assignment.network_generation &&
         source_mac_equal(previous->source_mac, assignment.source_mac)) {
         refresh_tc_activity(&previous->last_seen_ns, now);
 	} else {
-		struct sb_tc_assignment_claim claim = {
-			.socket_cookie = cookie, .generation = assignment.generation,
+        struct sb_tc_assignment_claim claim = {
+            .socket_cookie = cookie, .generation = assignment.generation,
+            .state = SB_TC_ASSIGNMENT_CLAIM_PUBLISH,
 		};
-		struct sb_tc_assignment_claim *existing_claim = map_lookup(&tc_assignment_claim, flow);
 		bool claim_owned = existing_claim != 0 &&
 			existing_claim->socket_cookie == claim.socket_cookie &&
-			existing_claim->generation == claim.generation;
+            existing_claim->generation == claim.generation &&
+            existing_claim->state == SB_TC_ASSIGNMENT_CLAIM_PUBLISH;
 		if (existing_claim == 0) {
 			if (map_update(&tc_assignment_claim, flow, &claim, BPF_NOEXIST) == 0) {
 				claim_owned = true;
@@ -141,7 +172,8 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
 				existing_claim = map_lookup(&tc_assignment_claim, flow);
 				claim_owned = existing_claim != 0 &&
 					existing_claim->socket_cookie == claim.socket_cookie &&
-					existing_claim->generation == claim.generation;
+					existing_claim->generation == claim.generation &&
+					existing_claim->state == SB_TC_ASSIGNMENT_CLAIM_PUBLISH;
 			}
 		}
 		if (!claim_owned) {
@@ -237,6 +269,11 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
         entry = map_lookup(&tc_return, &flow);
     }
     if (entry == 0) {
+        increment_stat(SB_TC_STAT_RETURN_LOOKUP_FAILURE);
+        return TC_ACT_SHOT;
+    }
+    if ((entry->network_generation & SB_TC_RETURN_NETWORK_MASK) !=
+        (control->network_generation & SB_TC_RETURN_NETWORK_MASK)) {
         increment_stat(SB_TC_STAT_RETURN_LOOKUP_FAILURE);
         return TC_ACT_SHOT;
     }
